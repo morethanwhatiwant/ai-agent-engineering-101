@@ -11,5 +11,8 @@
   },
   "review": {
     "cmd": "python buyer_review.py --deal {deal}"
+  },
+  "restock": {
+    "cmd": "python seller_strategy.py --state {state}"
   }
 }

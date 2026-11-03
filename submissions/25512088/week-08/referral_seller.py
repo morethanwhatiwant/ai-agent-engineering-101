@@ -26,6 +26,8 @@ from cryptography.hazmat.primitives import serialization
 from referral_program import Program, policy
 from referral_campaign import tick
 from stock_pricing import public_price
+from seller_strategy import sale_quote
+from market_intel import Intel
 
 STATE = Path(os.environ.get('MARKET_DIR', '.market'))
 
@@ -68,6 +70,7 @@ class Seller(AgentExecutor):
         text = get_message_text(context.message) or ''
         cred = credentials(text)
         program = Program(STATE)
+        intel = Intel(STATE)
         try:
             if text.strip().upper() == 'PROGRAM':
                 p = program.p
@@ -99,14 +102,14 @@ class Seller(AgentExecutor):
                 reserved = program.reserved_units() | {v['unit']['unit'] for v in self.open.values()}
                 unit = select_unit(text, inv['units'], reserved)
                 if not unit:
+                    intel.decision('seller_no_stock',{'task':task.id})
                     await up.reject(say('No matching stock available.'))
                     return
                 try:
-                    base = public_price(unit, catalog)
+                    q = sale_quote(unit, catalog, program, intel, token=cred['member'], ref=cred['ref'])
                 except ValueError:
                     await up.reject(say('Cannot verify this stock grade or expiry.'))
                     return
-                q = program.quote(base, unit['cost'], token=cred['member'], ref=cred['ref'])
                 deal = dict(unit=unit, quote=q, credentials=cred, until=time.time()+120)
                 self.open[task.id] = deal
             else:
@@ -116,8 +119,8 @@ class Seller(AgentExecutor):
                     await up.reject(say('The quoted stock is no longer available.'))
                     return
                 try:
-                    latest = program.quote(public_price(unit, catalog), unit['cost'],
-                                           token=deal['credentials']['member'], ref=deal['credentials']['ref'])
+                    latest = sale_quote(unit, catalog, program, intel,
+                                        token=deal['credentials']['member'], ref=deal['credentials']['ref'])
                 except ValueError:
                     self.open.pop(task.id, None)
                     await up.reject(say('Cannot verify this stock grade or expiry.'))
@@ -139,14 +142,16 @@ class Seller(AgentExecutor):
                     await up.add_artifact(parts=[new_data_part(receipt)], name='receipt')
                     private = (f' Private provisional member key: {secret}. Save privately; never post it. '
                                'After payment use STATUS member=<key> for your referral code.') if secret else ''
+                    intel.decision('seller_signed',{'sku':unit['sku'],'price':q['price'],'cost':unit['cost']})
                     await up.complete(say(f"Agreed at {q['price']}. Membership activates only after market settlement."+private))
                     self.open.pop(task.id, None)
                     return
             q = deal['quote']
-            await up.requires_input(say(f"{deal['unit']['name']}: public price {q['base']}; benefit {q['benefit']}. "
+            await up.requires_input(say(f"{deal['unit']['name']} ({deal['unit']['sku']}): grade {deal['unit']['grade']}; public price {q['base']}; benefit {q['benefit']}. "
                                        f"Send a number to accept. Asking {q['price']}"))
         finally:
             program.close()
+            intel.close()
 
     async def cancel(self, context, event_queue):
         task = context.current_task
@@ -160,7 +165,7 @@ def build(port, publish=True):
         async def loop():
             while True:
                 try:
-                    await asyncio.to_thread(tick, STATE, 'shop_key.pem', publish)
+                    await asyncio.to_thread(tick, STATE, 'shop_key.pem', False)
                 except Exception as exc:
                     print('referral synchronization:', type(exc).__name__, flush=True)
                 await asyncio.sleep(15)

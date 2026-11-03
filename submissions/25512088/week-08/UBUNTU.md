@@ -57,3 +57,19 @@ tmux는 PC 절전/종료나 WSL 종료를 막지는 않습니다.
 ```bash
 python3 submissions/25512088/week-08/backup_private.py ../exports/market-private-final.zip
 ```
+
+## 시장조사 연결 버전
+
+`run_ubuntu.sh`는 이제 `market_runtime.py`로 실행합니다. 기존 키트 명령으로
+실행한 두 프로세스는 한 번 재시작해야 연구 워커와 buyer 전용 포럼 큐가 적용됩니다.
+시장조사 보고서: `.market/market-report.json`, 공동 기억: `.market/market_intel.sqlite3`.
+수집 중단/표본 부족 시 무리한 발주를 하지 않고, 셀러는 원가 보호 가격을 사용합니다.
+이 구성은 규칙 기반이며 LLM이 자동으로 매매를 결정하지 않습니다.
+
+Mac 기존 가상환경에서 새 버전 실행 (저장소 루트, 역할별 터미널):
+```bash
+python submissions/25512088/week-08/market_runtime.py join --dir submissions/25512088/week-08 --market https://market.ourolabs.ai --name 25512088 --tunnel --shop-only
+python submissions/25512088/week-08/market_runtime.py join --dir submissions/25512088/week-08 --market https://market.ourolabs.ai --name 25512088 --buyer-only
+```
+두 명령을 각각 별도 터미널에서 실행합니다. 기존 프로세스와 중복 실행하지 않습니다.
+기존 개인 ZIP에는 새 공동 SQLite가 없으므로, 연구실 이전 직전에 최종 백업을 다시 만듭니다.

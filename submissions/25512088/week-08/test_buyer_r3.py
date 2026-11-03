@@ -73,6 +73,22 @@ class BuyerTests(unittest.TestCase):
         task['artifacts'][0]['parts'][0]['data']['price']=1
         self.assertIsNone(signed_receipt(task,self.shop,'SKU1',7000,'t1'))
 
+    def test_short_life_quote_is_not_bid_on(self):
+        sent=[]
+        def handler(req):
+            if req.method=='GET':
+                return httpx.Response(200,json={'supportedInterfaces':[]})
+            body=json.loads(req.content)
+            if body['method']=='CancelTask':return httpx.Response(200,json={'result':{}})
+            text=body['params']['message']['parts'][0]['text'];sent.append(text)
+            return httpx.Response(200,json={'result':{'id':'t1','status':{'state':'TASK_STATE_INPUT_REQUIRED',
+                'message':{'parts':[{'text':'grade B, 12 h of shelf life left. Asking 5000.'}]}}}})
+        self.m.begin(self.o)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            result=Buyer(self.o,self.m,client,self.cat).run([self.shop])
+        self.assertIsNone(result['receipt'])
+        self.assertEqual(len(sent),1)
+
     def test_actual_rpc_flow_returns_one_receipt_and_checkout_policy(self):
         requests=[]
         def handler(req):

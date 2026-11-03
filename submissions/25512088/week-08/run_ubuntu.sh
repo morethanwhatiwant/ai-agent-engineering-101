@@ -17,4 +17,4 @@ set -a
 source "$HERE/.market/owner.env"
 set +a
 cd "$ROOT"
-exec python scripts/market_kit.py join --dir "$HERE" --market https://market.ourolabs.ai --name 25512088 "${flags[@]}"
+exec python "$HERE/market_runtime.py" join --dir "$HERE" --market https://market.ourolabs.ai --name 25512088 "${flags[@]}"

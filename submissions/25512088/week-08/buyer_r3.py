@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from buyer_memory import Memory
+from market_intel import Intel
 
 
 def task_state(task):
@@ -60,7 +61,7 @@ def exclude_own_shop(shops, name, pubkey):
     return [s for s in shops if s.get('name') != name and s.get('pubkey') != pubkey]
 
 
-def candidates(order, shops, catalog, memory):
+def candidates(order, shops, catalog, memory, intel=None):
     accepted = set(order['acceptable'])
     ranked = []
     for shop in shops:
@@ -72,7 +73,8 @@ def candidates(order, shops, catalog, memory):
         offer = min(options, key=lambda o: (
             memory.reference(shop['url'],o['sku']) or catalog[o['sku']]['list_price']))
         reference = memory.reference(shop['url'],offer['sku'])
-        ranked.append((reference or catalog[offer['sku']]['list_price'], shop['name'],shop,offer))
+        reliability = intel.reliability(shop['url']) if intel else 1
+        ranked.append(((reference or catalog[offer['sku']]['list_price']) / max(.1,reliability), shop['name'],shop,offer))
     ranked.sort(key=lambda r:(r[0],r[1]))
     return [(r[2],r[3]) for r in ranked[:3]]
 
@@ -101,9 +103,10 @@ def signed_receipt(task, shop, sku, maximum, task_id):
 
 
 class Buyer:
-    def __init__(self, order, memory, client, catalog):
+    def __init__(self, order, memory, client, catalog, intel=None):
         self.o, self.m, self.c, self.catalog = order, memory, client, catalog
         self.sessions = []
+        self.intel = intel
         self.deadline = min(time.time()+85, order['expires']-3)
 
     def result(self, session=None, receipt=None, reason='No acceptable deal'):
@@ -153,7 +156,7 @@ class Buyer:
     def run(self, shops):
         quotes=[]
         try:
-            for shop, offer in candidates(self.o,shops,self.catalog,self.m):
+            for shop, offer in candidates(self.o,shops,self.catalog,self.m,self.intel):
                 if time.time()>=self.deadline:
                     break
                 sku=offer['sku']; product=self.catalog[sku]
@@ -178,13 +181,24 @@ class Buyer:
                         return self.completed(s)
                     if not task_state(task).endswith('INPUT_REQUIRED'):
                         continue
-                    ask=asking(text_of(task))
-                    s['grade']=grade_of(text_of(task))
+                    content=text_of(task)
+                    ask=asking(content)
+                    s['grade']=grade_of(content)
+                    life=re.search(r'(\d+(?:\.\d+)?)\s*h(?:ours?)?\s+(?:of )?shelf life left',content,re.I)
+                    warranty=re.search(r'warranty\s*[:=]?\s*(\d+(?:\.\d+)?)\s*h',content,re.I)
+                    hours=float(life.group(1)) if life else None
+                    wh=float(warranty.group(1)) if warranty else None
+                    unsuitable=(self.o.get('kind')=='food' and hours is not None and hours<self.o['use_within_hours']) or (self.o.get('kind')!='food' and wh is not None and wh<6)
+                    if self.intel:
+                        self.intel.observe(shop['url'],sku,'condition_rejected' if unsuitable else 'quote',ask,s['grade'],hours,wh)
+                    if unsuitable:
+                        continue
                     s['cap']=limit(self.o,product,s['grade'])
                     if ask and s['cap']>0:
                         s['ask']=ask
                         quotes.append(s)
                 except Exception as exc:
+                    if self.intel:self.intel.observe(shop['url'],sku,'unavailable')
                     self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unavailable',details={'error':type(exc).__name__})
             # Compare prices relative to each exact product's catalog value.
             quotes.sort(key=lambda s:s['ask']/self.catalog[s['sku']]['list_price'])
@@ -233,6 +247,7 @@ def main():
     args=ap.parse_args()
     order=json.loads(Path(args.order).read_text())
     memory=Memory(args.state)
+    intel=Intel(args.state)
     try:
         memory.sync()
         if not memory.begin(order):
@@ -247,11 +262,20 @@ def main():
                 shops=json.loads(Path(args.shops).read_text())
                 shops=[dict(s,pubkey=keys[(s['url'],s['name'])]) for s in shops if (s['url'],s['name']) in keys]
                 shops=exclude_own_shop(shops, *own_shop_identity())
-                out=Buyer(order,memory,client,json.loads((Path(args.state)/'catalog.json').read_text())).run(
+                # Same GitHub owner with another shop/key cannot settle either.
+                board=intel.source('board',{}) or {}
+                own_name=own_shop_identity()[0]
+                own_row=next((r for r in board.get('shops',[]) if r.get('name')==own_name),{})
+                owner=(own_row.get('owner') or {}).get('login')
+                if owner:
+                    own_names={r.get('name') for r in board.get('shops',[]) if (r.get('owner') or {}).get('login')==owner}
+                    shops=[s for s in shops if s.get('name') not in own_names]
+                out=Buyer(order,memory,client,json.loads((Path(args.state)/'catalog.json').read_text()),intel).run(
                     shops)
         print(json.dumps(out,ensure_ascii=False),flush=True)
     finally:
         memory.close()
+        intel.close()
 
 
 if __name__=='__main__':
