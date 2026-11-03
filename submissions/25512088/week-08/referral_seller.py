@@ -28,6 +28,7 @@ from referral_campaign import tick
 from stock_pricing import public_price
 from seller_strategy import sale_quote
 from market_intel import Intel
+from shop_copy import SHOP_DESCRIPTION
 
 STATE = Path(os.environ.get('MARKET_DIR', '.market'))
 
@@ -147,8 +148,11 @@ class Seller(AgentExecutor):
                     self.open.pop(task.id, None)
                     return
             q = deal['quote']
+            expiry=deal['unit'].get('expires_at')
+            conditions=(f"{max(0,int((expiry-time.time())/3600))} h of shelf life left; "
+                        if expiry else 'warranty 0 h; ')
             await up.requires_input(say(f"{deal['unit']['name']} ({deal['unit']['sku']}): grade {deal['unit']['grade']}; public price {q['base']}; benefit {q['benefit']}. "
-                                       f"Send a number to accept. Asking {q['price']}"))
+                                       f"{conditions}Send a number to accept. Asking {q['price']}"))
         finally:
             program.close()
             intel.close()
@@ -178,12 +182,12 @@ def build(port, publish=True):
                 await worker
             except asyncio.CancelledError:
                 pass
-    card = AgentCard(name=policy()['shop_name'], description='Stock shop with founding-member discount. Send PROGRAM for referral terms.',
-        version='1.0.0', default_input_modes=['text/plain'], default_output_modes=['application/json','text/plain'],
+    card = AgentCard(name=policy()['shop_name'], description=SHOP_DESCRIPTION,
+        version='1.1.0', default_input_modes=['text/plain'], default_output_modes=['application/json','text/plain'],
         capabilities=AgentCapabilities(streaming=False), supported_interfaces=[AgentInterface(
             protocol_binding='JSONRPC', url=f'http://127.0.0.1:{port}/', protocol_version='1.0')],
-        skills=[AgentSkill(id='shop', name='Buy and refer', description='Ask for SKU; optionally append ref=code or member=private_key.',
-                           tags=['shopping','referral'], examples=['PROGRAM', 'I want to buy G00001 ref=REF-EXAMPLE'])])
+        skills=[AgentSkill(id='shop', name='Check stock and buy', description='Send a product name or SKU to get current price and grade; send the quoted amount to purchase. PROGRAM explains optional loyalty benefits.',
+                           tags=['shopping','stock','price'], examples=['I want to buy <SKU>', 'PROGRAM'])])
     handler = DefaultRequestHandler(agent_executor=Seller(), task_store=InMemoryTaskStore(), agent_card=card)
     return Starlette(routes=create_agent_card_routes(card)+create_jsonrpc_routes(handler, '/'), lifespan=lifespan)
 

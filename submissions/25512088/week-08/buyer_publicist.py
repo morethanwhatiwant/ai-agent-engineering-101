@@ -1,11 +1,29 @@
 """Buyer posts evidence summaries or clearly disclosed own-shop offers."""
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 from market_intel import read_json, WINDOW
 from referral_program import Program
 from seller_strategy import sale_quote
+from shop_copy import stock_ad, paid_post
+
+
+def latest_paid_post(intel):
+    path=intel.root/'buyer.sqlite3'
+    if not path.exists():return None
+    posted=set(intel.get('posted_purchase_ledgers',[]))
+    catalog=read_json(intel.root/'catalog.json',{})
+    with sqlite3.connect(str(path),timeout=2) as db:
+        rows=db.execute('SELECT p.sku,p.price,p.ledger,o.details FROM payments p JOIN outcomes o ON o.order_id=p.order_id WHERE p.paid=1 AND p.ledger IS NOT NULL ORDER BY p.ledger DESC LIMIT 30').fetchall()
+    for sku,price,ledger,body in rows:
+        if ledger in posted:continue
+        outcome=json.loads(body);product=catalog.get(sku,{})
+        return paid_post(outcome.get('name',product.get('name',sku)),sku,price,
+                         outcome.get('grade','미확인'),product.get('list_price'),
+                         outcome.get('claim_honest'),ledger),ledger
+    return None
 
 
 def queue_update(intel):
@@ -27,7 +45,7 @@ def queue_update(intel):
         mine=[r for r in posts if r.get('author')==name and r.get('role')=='buyer']
         negative=sum(r.get('dislikes',0)-r.get('likes',0) for r in mine)>0
         research=negative or not program.live(now) or intel.get('posts_today',0)%2==1
-        refs=[];text=''
+        refs=[];text='';purchase_ledger=None
         if research:
             row=intel.db.execute('SELECT sku,grade,COUNT(*) n,MIN(price) lo,MAX(price) hi,MAX(seq) seq FROM trades WHERE ts>? GROUP BY sku,grade HAVING COUNT(*)>=3 ORDER BY n DESC LIMIT 1',(now-WINDOW,)).fetchone()
             if row:
@@ -48,12 +66,18 @@ def queue_update(intel):
                 except ValueError:continue
                 offers.append((q['price']/u['list_price'],u,q))
             if offers:
-                _,u,q=min(offers,key=lambda x:x[0])
-                hours=max(0,(u['expires_at']-now)/3600) if u.get('expires_at') else None
-                condition=f", 남은 기한 약 {hours:.0f}시간" if hours is not None else ', 보증 없음'
-                text=(f"[같은 운영자 가게 안내: {name}] {u['name'][:45]} ({u['sku']}) "
-                      f"{u['grade']}등급{condition}, 현재 일반 견적 {q['price']:,}원. "
-                      '창립단골은 조건 충족 시 5% 할인! 참여 조건은 PROGRAM. 재고·시간에 따라 견적 변동.')
+                # Rotate distinct products instead of repeatedly advertising the cheapest unit.
+                previous=set(intel.get('last_ad_skus',[]));selected=[];seen=set()
+                for _,u,q in sorted(offers,key=lambda o:(o[1]['sku'] in previous,o[0])):
+                    if u['sku'] in seen:continue
+                    selected.append((u,q));seen.add(u['sku'])
+                    if len(selected)==2:break
+                text=stock_ad(name,selected,now)
+                intel.put('last_ad_skus',list(seen))
+        if research:
+            paid=latest_paid_post(intel)
+            if paid:
+                text,purchase_ledger=paid;refs=[purchase_ledger]
         if not text:return False
         folder=state/'buyer-forum';folder.mkdir(exist_ok=True)
         # Timestamp before append favors losing one post over duplicate flooding.
@@ -61,6 +85,8 @@ def queue_update(intel):
         fd=os.open(folder/'outbox.jsonl',os.O_CREAT|os.O_APPEND|os.O_WRONLY,0o600)
         try:os.write(fd,(json.dumps({'as':'buyer','post':text,'refs':refs},ensure_ascii=False)+'\n').encode())
         finally:os.close(fd)
+        if purchase_ledger:
+            intel.put('posted_purchase_ledgers',(intel.get('posted_purchase_ledgers',[])+[purchase_ledger])[-200:])
         intel.decision('buyer_forum',{'research':research,'negative_feedback':negative,'buyer_deals':buyer.get('deals'),'refs':refs})
         return True
     finally:program.close()
