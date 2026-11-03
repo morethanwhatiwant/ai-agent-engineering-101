@@ -1,0 +1,26 @@
+import io
+import unittest
+from unittest.mock import patch,Mock
+from market_runtime import tunnel_url,open_tunnel
+
+class TunnelTests(unittest.TestCase):
+    def test_api_endpoint_is_never_a_shop(self):
+        self.assertIsNone(tunnel_url('failed POST https://api.trycloudflare.com/tunnel'))
+        self.assertIsNone(tunnel_url('https://api.trycloudflare.com'))
+        self.assertEqual(tunnel_url('| https://wheel-finder-dylan-last.trycloudflare.com |'),
+                         'https://wheel-finder-dylan-last.trycloudflare.com')
+    def test_error_api_line_before_real_tunnel(self):
+        proc=Mock()
+        proc.stdout=io.StringIO('failed https://api.trycloudflare.com\nhttps://actual-shop-test-host.trycloudflare.com\n')
+        proc.poll.return_value=None
+        with patch('market_runtime.subprocess.Popen',return_value=proc):
+            result,url=open_tunnel(9999)
+        self.assertIs(result,proc)
+        self.assertEqual(url,'https://actual-shop-test-host.trycloudflare.com')
+        proc.terminate.assert_not_called()
+    def test_failed_process_reports_creation_failure(self):
+        proc=Mock();proc.stdout=io.StringIO('failed https://api.trycloudflare.com\n');proc.poll.return_value=1
+        with patch('market_runtime.subprocess.Popen',return_value=proc):
+            with self.assertRaisesRegex(RuntimeError,'did not create'):open_tunnel(9999)
+
+if __name__=='__main__':unittest.main()

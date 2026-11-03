@@ -1,5 +1,8 @@
 """Local kit adapter: role-isolated forum outboxes and buyer research worker."""
 import importlib.util
+import re
+import subprocess
+import queue
 from pathlib import Path
 import sys
 import threading
@@ -26,10 +29,43 @@ def dispatch_outbox(original, market, md):
     if 'buyer' in market.token:original(market,md/'buyer-forum')
 
 
+def tunnel_url(line):
+    # Error logs mention api.trycloudflare.com; it is NOT a public shop tunnel.
+    for host in re.findall(r'https://([a-z0-9-]+)\.trycloudflare\.com\b',line):
+        if '-' in host and not host.startswith('-') and not host.endswith('-'):
+            return 'https://'+host+'.trycloudflare.com'
+    return None
+
+
+def open_tunnel(port):
+    proc=subprocess.Popen(['cloudflared','tunnel','--no-autoupdate','--url',f'http://127.0.0.1:{port}'],
+        stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+    urls=queue.Queue()
+    def read():
+        for line in proc.stdout:
+            url=tunnel_url(line)
+            if url:urls.put(url)
+    threading.Thread(target=read,daemon=True).start()
+    deadline=time.monotonic()+60
+    try:
+        while time.monotonic()<deadline:
+            try:return proc,urls.get(timeout=.2)
+            except queue.Empty:
+                if proc.poll() is not None:break
+        raise RuntimeError('Cloudflare did not create a public tunnel; check network and retry. API URLs are ignored.')
+    except BaseException:
+        if proc.poll() is None:
+            proc.terminate()
+            try:proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:proc.kill();proc.wait()
+        raise
+
+
 def main():
     root=Path(__file__).resolve().parents[3]
     spec=importlib.util.spec_from_file_location('course_market_kit',root/'scripts/market_kit.py')
     kit=importlib.util.module_from_spec(spec);spec.loader.exec_module(kit)
+    kit.open_tunnel=open_tunnel
     original=kit.outbox
     def outbox(market,md):
         # Buyer must never take a shop post and silently publish it as buyer.
