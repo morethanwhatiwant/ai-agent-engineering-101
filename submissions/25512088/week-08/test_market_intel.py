@@ -57,10 +57,10 @@ class IntelligenceTests(unittest.TestCase):
         self.i.ingest(self.rows());self.i.put('ledger_through',time.time())
         inv=dict(round=3,restock={'open':True},balance=5000000,start=5000000,units=[])
         cat={'x':dict(list_price=10000,category='c')}
-        self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[{'sku':'x','qty':2}])
+        self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[{'sku':'x','qty':1}])
         self.assertEqual(restock_plan(dict(inv,restock={'open':False}),cat,self.i)['buy'],[])
         self.assertEqual(restock_plan(dict(inv,balance=2500000),cat,self.i)['buy'],[])
-        self.assertEqual(restock_plan(dict(inv,units=[self.u]*20),cat,self.i)['buy'],[])
+        self.assertEqual(restock_plan(dict(inv,units=[self.u]*24),cat,self.i)['buy'],[])
         self.i.put('ledger_through',0)
         self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[])
     def test_failure_deprioritizes_shop(self):

@@ -4,6 +4,7 @@ from collections import Counter
 import json
 import math
 from pathlib import Path
+from statistics import median
 import time
 from market_intel import Intel, read_json, WINDOW
 from stock_pricing import public_price
@@ -34,11 +35,37 @@ def sale_quote(unit, catalog, program, intel=None, token='', ref=''):
     return q
 
 
+def graded_demand(sku, product, intel, now):
+    """Unknown arrival grade: separate scenarios and exclude unsupported warranties."""
+    food=product.get('kind')=='food'
+    probabilities={'A':.25,'B':.50,'C':.25} if food else {'A':.70,'B':.20,'C':.10}
+    upper_cost={'A':.75,'B':.60,'C':.45}
+    rows=intel.db.execute('SELECT * FROM trades WHERE sku=? AND ts>?',(sku,now-WINDOW)).fetchall()
+    scenarios=[]; supported=0; demand=0
+    for grade,probability in probabilities.items():
+        comparable=[r for r in rows if r['grade']==grade and
+                    ((food and r['hours'] is not None and r['hours']>0) or
+                     (not food and r['hours'] is None and r['warranty']==0))]
+        shelf=product.get('shelf_hours')
+        if food and isinstance(shelf,(int,float)) and shelf>0:
+            lo,hi={'A':(.8,1),'B':(.45,.8),'C':(0,.45)}[grade]
+            comparable=[r for r in comparable if lo*shelf<=r['hours']<=hi*shelf]
+        cost=math.ceil(product['list_price']*upper_cost[grade])
+        price=int(median([r['price'] for r in comparable])) if comparable else None
+        floor=cost_floor(cost,{'founder_percent':5,'acquisition_margin_percent':25})
+        viable=len(comparable)>=3 and price>=floor
+        scenarios.append(dict(grade=grade,sales=len(comparable),median=price,
+                              upper_cost=cost,required_price=floor,viable=viable))
+        if viable:supported+=probability;demand+=len(comparable)
+    return dict(sku=sku,grade_scenarios=scenarios,supported_arrival_probability=round(supported,2),
+                compatible_sales=demand,uncertainty='Other arrival grades may remain unsold.')
+
+
 def restock_plan(inv,catalog,intel,now=None):
     now=time.time() if now is None else now
     if inv.get('round')!=3 or not inv.get('restock',{}).get('open'):
         return {'buy':[], 'reason':'supply_closed'}
-    stock=inv.get('units',[]);slots=max(0,20-len(stock))
+    stock=inv.get('units',[]);slots=max(0,24-len(stock))  # Four bounded trial slots.
     reserve=max(500000,inv.get('start',5000000)*.5)
     budget=max(0,min(inv.get('balance',0)-reserve,inv.get('balance',0)*.05))
     if not slots or not budget:return {'buy':[],'reason':'inventory_or_cash_limit'}
@@ -69,23 +96,30 @@ def restock_plan(inv,catalog,intel,now=None):
         product=catalog.get(sku)
         if not product or have[sku]>=2:continue
         if categories and product.get('category') not in categories:continue
-        prices=[r[0] for r in intel.db.execute('SELECT price FROM trades WHERE sku=? AND ts>?',(sku,now-WINDOW))]
-        if len(prices)<3:continue
-        # Supply grade is unknown; require observed prices above worst-case cost + reserve.
+        evidence=graded_demand(sku,product,intel,now)
+        if evidence['supported_arrival_probability']<.25:continue
+        # Cash budget uses worst acquisition cost; demand comparisons use each grade.
         worst=math.ceil(product['list_price']*.75)
-        safe=cost_floor(worst,{'founder_percent':5,'acquisition_margin_percent':25})
-        viable=sum(v>=safe for v in prices)/len(prices)
-        if viable<.5:continue
-        score=n/(1+supply[sku]) * viable * (1+min(2,endorsed[sku])*.05)
-        options.append((score,sku,worst))
-    options.sort(reverse=True)
-    buys=[]
-    for score,sku,worst in options[:3]:
-        qty=min(2-have[sku],slots,int(budget//worst))
+        score=evidence['compatible_sales']/(1+supply[sku])*evidence['supported_arrival_probability']
+        score*=1+min(2,endorsed[sku])*.05
+        evidence.update(score=round(score,4),competing_units=supply[sku])
+        options.append((score,sku,worst,evidence))
+    options.sort(key=lambda x:(x[0],x[1]),reverse=True)
+    buys=[];selected=[]
+    for score,sku,worst,evidence in options[:3]:
+        proven=False
+        db=intel.root/'referrals.sqlite3'
+        if db.exists():
+            import sqlite3
+            with sqlite3.connect(str(db)) as conn:
+                proven=conn.execute('SELECT 1 FROM sales WHERE sku=? AND settled IS NOT NULL AND refunded=0 LIMIT 1',(sku,)).fetchone() is not None
+        qty=min((2 if proven else 1)-have[sku],slots,int(budget//worst))
         if qty>0:
             buys.append({'sku':sku,'qty':qty});slots-=qty;budget-=qty*worst
-    return {'buy':buys,'reason':'observed_demand_and_conservative_cost' if buys else 'no_profitable_evidence',
-            'candidates':len(options),'cash_reserve':reserve}
+            selected.append(dict(evidence,qty=qty,own_sales_proven=proven))
+    return {'buy':buys,'reason':'grade_condition_matched_trial' if buys else 'no_profitable_evidence',
+            'candidates':len(options),'cash_reserve':reserve,'selected':selected,
+            'ranked_candidates':[x[3] for x in options[:8]]}
 
 
 def main():
