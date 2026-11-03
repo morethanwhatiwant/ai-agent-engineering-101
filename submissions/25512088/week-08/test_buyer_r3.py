@@ -1,0 +1,98 @@
+import base64
+import json
+from pathlib import Path
+import tempfile
+import time
+import unittest
+import httpx
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives import serialization
+from buyer_memory import Memory
+from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt
+from buyer_review import review
+
+
+class BuyerTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory(); self.m=Memory(self.tmp.name)
+        self.o=dict(order='o1',item='김치',budget=10000,acceptable=['SKU1'],kind='food',use_within_hours=48,expires=time.time()+600)
+        self.cat={'SKU1':dict(name='김치1',list_price=10000)}
+        self.key=Ed25519PrivateKey.generate()
+        pub=base64.b64encode(self.key.public_key().public_bytes(serialization.Encoding.Raw,serialization.PublicFormat.Raw)).decode()
+        self.shop=dict(name='shop',url='https://shop.test',pubkey=pub,offers=[dict(sku='SKU1',name='김치1',qty=2)])
+
+    def tearDown(self):
+        self.m.close(); self.tmp.cleanup()
+
+    def receipt(self, price=7000, sku='SKU1'):
+        r=dict(shop='shop',item=sku,price=price,task='t1')
+        raw=json.dumps(r,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+        return dict(r,sig_seller=base64.b64encode(self.key.sign(raw)).decode())
+
+    def test_restarts_never_repeat_an_order(self):
+        self.assertTrue(self.m.begin(self.o))
+        self.m.state('o1','offer_in_flight'); self.m.close(); self.m=Memory(self.tmp.name)
+        self.assertFalse(self.m.begin(self.o))
+
+    def test_payment_only_not_agreement_is_price_evidence(self):
+        self.m.begin(self.o)
+        self.m.record('o1',self.shop['url'],'SKU1','t1','agreement',7000)
+        self.assertIsNone(self.m.reference(self.shop['url'],'SKU1'))
+        (Path(self.tmp.name)/'payments.jsonl').write_text(json.dumps(dict(order='o1',shop=self.shop['url'],item='SKU1',price=7000,paid=True,ledger=10))+'\n')
+        self.m.sync(); self.m.sync()
+        self.assertEqual(self.m.reference(self.shop['url'],'SKU1'),7000)
+        self.assertIsNone(self.m.reference(self.shop['url'],'SKU2'))
+        self.assertEqual(self.m.db.execute('SELECT COUNT(*) FROM payments').fetchone()[0],1)
+
+    def test_limit_uses_sku_and_grade_not_identical_budget_fraction(self):
+        self.assertEqual(limit(self.o,self.cat['SKU1'],'A'),9500)
+        self.assertEqual(limit(self.o,self.cat['SKU1'],'C'),6000)
+        self.assertEqual(limit(self.o,dict(list_price=2000),'A'),1900)
+
+    def test_only_three_shops_with_acceptable_stock(self):
+        shops=[dict(self.shop,name=str(i)) for i in range(8)]+[dict(self.shop,name='bad',offers=[dict(sku='wrong',qty=1)])]
+        self.assertEqual(len(candidates(self.o,shops,self.cat,self.m)),3)
+
+    def test_numbers_in_sku_and_expiry_are_not_quotes(self):
+        self.assertIsNone(asking('SKU123 10개 48 hours'))
+        self.assertEqual(asking('Counteroffer: 7,000.'),7000)
+
+    def test_receipt_signature_and_exact_sku(self):
+        task={'artifacts':[{'parts':[{'data':self.receipt()}]}]}
+        self.assertIsNotNone(signed_receipt(task,self.shop,'SKU1',7000,'t1'))
+        self.assertIsNone(signed_receipt(task,self.shop,'SKU2',7000,'t1'))
+        self.assertIsNone(signed_receipt(task,self.shop,'SKU1',6000,'t1'))
+        task['artifacts'][0]['parts'][0]['data']['price']=1
+        self.assertIsNone(signed_receipt(task,self.shop,'SKU1',7000,'t1'))
+
+    def test_actual_rpc_flow_returns_one_receipt_and_checkout_policy(self):
+        requests=[]
+        def handler(req):
+            if req.method=='GET':
+                return httpx.Response(200,json={'supportedInterfaces':[{'url':'https://shop.test/','protocolBinding':'JSONRPC'}]})
+            b=json.loads(req.content); requests.append(b)
+            text=b.get('params',{}).get('message',{}).get('parts',[{}])[0].get('text','')
+            if text=='7000':
+                task=dict(id='t1',status={'state':'TASK_STATE_COMPLETED'},artifacts=[{'parts':[{'data':self.receipt()}]}])
+            else:
+                task=dict(id='t1',status={'state':'TASK_STATE_INPUT_REQUIRED','message':{'parts':[{'text':'Grade A. Asking 7000'}]}})
+            return httpx.Response(200,json={'result':{'task':task}})
+        self.m.begin(self.o)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            out=Buyer(self.o,self.m,client,self.cat).run([self.shop])
+        self.assertEqual(out['receipt']['item'],'SKU1')
+        self.assertEqual(out['accept']['min_hours_left'],48)
+        self.assertTrue(out['accept']['cert'])
+        self.assertEqual(out['accept']['grades'],['A'])
+        self.assertEqual(self.m.db.execute('SELECT state FROM orders').fetchone()[0],'awaiting_payment')
+        self.assertIsNone(self.m.reference(self.shop['url'],'SKU1'))
+
+    def test_review_preserves_actual_conditions(self):
+        self.m.begin(self.o)
+        out=review({'order':self.o,'receipt':self.receipt(),'settled':{'grade':'B','claim_honest':False,'ledger':5}},self.m)
+        self.assertEqual(out['stars'],1)
+        self.assertEqual(self.m.db.execute('SELECT COUNT(*) FROM outcomes').fetchone()[0],1)
+
+
+if __name__=='__main__':
+    unittest.main()
