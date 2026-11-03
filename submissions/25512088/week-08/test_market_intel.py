@@ -1,0 +1,95 @@
+import json
+from pathlib import Path
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+import httpx
+from market_intel import Intel
+from seller_strategy import sale_quote,restock_plan,cost_floor
+from referral_program import Program
+from buyer_publicist import queue_update
+from buyer_r3 import Buyer
+from buyer_memory import Memory
+
+
+class IntelligenceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name)
+        self.i=Intel(self.root);self.p=Program(self.root)
+        self.u=dict(sku='x',unit='u',name='item',kind='goods',grade='A',cost=8000,list_price=10000,expires_at=None)
+    def tearDown(self):
+        self.p.close();self.i.close();self.tmp.cleanup()
+    def rows(self,price=9500,grade='A',expiry=None,warranty=0):
+        now=time.time()
+        return [dict(seq=n,ts=now,kind='settle',round=3,data=dict(shop='https://shop',sku='x',grade=grade,amount=price,expires_at=expiry,warranty_hours=warranty,claim_honest=True)) for n in range(1,5)]
+    def test_idempotent_only_real_round3_settlements(self):
+        rows=self.rows();rows += [dict(rows[0],seq=9,round=2),dict(rows[0],seq=10,kind='result')]
+        self.i.ingest(rows);self.i.ingest(rows)
+        self.assertEqual(self.i.db.execute('select count(*) from trades').fetchone()[0],4)
+    def test_price_requires_same_grade_warranty_and_enough_samples(self):
+        self.i.ingest(self.rows())
+        self.assertEqual(self.i.comparable('x','A')['median'],9500)
+        self.assertIsNone(self.i.comparable('x','B')['median'])
+        self.assertIsNone(self.i.comparable('x','A',warranty=6)['median'])
+        self.assertIsNone(self.i.comparable('wrong','A')['median'])
+    def test_food_comparison_life_and_expiry(self):
+        self.i.ingest(self.rows(expiry=time.time()+12*3600))
+        self.assertEqual(self.i.comparable('x','A',12)['count'],4)
+        self.assertIsNone(self.i.comparable('x','A',120)['median'])
+        with self.assertRaises(ValueError):sale_quote(dict(self.u,kind='food',expires_at=time.time()-1),{},self.p,self.i)
+    def test_market_price_applies_but_never_breaks_floor(self):
+        self.i.ingest(self.rows(price=5000))
+        q=sale_quote(self.u,{},self.p,self.i)
+        self.assertGreaterEqual(q['price'],8720)
+        self.assertEqual(q['base'],cost_floor(8000,self.p.p))
+    def test_benefit_variants_preserve_net_margin(self):
+        # Force founder and referral branches through actual membership records.
+        seed=self.p.quote(12000,8000)
+        key=self.p.accept('t','unit','sku',8000,seed)
+        with self.p.db:self.p.db.execute('update members set active=1,founder=1,credit=1000')
+        ref=self.p.db.execute('select code from members').fetchone()[0]
+        for cost in (1,8000,20000):
+            for token,code in [('', ''),(key,''),('',ref)]:
+                q=sale_quote(dict(self.u,cost=cost),{},self.p,self.i,token,code)
+                self.assertGreaterEqual(q['price']-q['reward'],cost+__import__('math').ceil(cost*.09))
+    def test_restock_window_cash_evidence_and_stock_limits(self):
+        self.i.ingest(self.rows());self.i.put('ledger_through',time.time())
+        inv=dict(round=3,restock={'open':True},balance=5000000,start=5000000,units=[])
+        cat={'x':dict(list_price=10000,category='c')}
+        self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[{'sku':'x','qty':2}])
+        self.assertEqual(restock_plan(dict(inv,restock={'open':False}),cat,self.i)['buy'],[])
+        self.assertEqual(restock_plan(dict(inv,balance=2500000),cat,self.i)['buy'],[])
+        self.assertEqual(restock_plan(dict(inv,units=[self.u]*20),cat,self.i)['buy'],[])
+        self.i.put('ledger_through',0)
+        self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[])
+    def test_failure_deprioritizes_shop(self):
+        before=self.i.reliability('url');self.i.observe('url','x','unavailable')
+        self.assertLess(self.i.reliability('url'),before)
+    def test_offline_refresh_preserves_data(self):
+        self.i.ingest(self.rows());self.i.put('cursor',4)
+        with httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(503))) as client:
+            self.i.refresh('https://market',client)
+        self.assertEqual(self.i.get('cursor'),4)
+        self.assertEqual(self.i.comparable('x','A')['count'],4)
+        self.assertTrue(self.i.get('errors'))
+    def test_role_queues_never_cross(self):
+        from market_runtime import dispatch_outbox
+        from types import SimpleNamespace
+        seen=[]
+        dispatch_outbox(lambda m,p:seen.append(p),SimpleNamespace(token={'buyer':'secret'}),self.root)
+        self.assertEqual(seen,[self.root/'buyer-forum'])
+        seen.clear()
+        dispatch_outbox(lambda m,p:seen.append(p),SimpleNamespace(token={'shop':'secret'}),self.root)
+        self.assertEqual(seen,[self.root])
+
+    def test_buyer_ad_has_actual_price_role_and_rate_limit(self):
+        name=self.p.p['shop_name']
+        self.i.save_source('board',{'round':3,'shops':[{'name':name,'alive':True}],'buyers':[]})
+        (self.root/'inventory.json').write_text(json.dumps({'units':[self.u]}))
+        self.assertTrue(queue_update(self.i));self.assertFalse(queue_update(self.i))
+        msg=json.loads((self.root/'buyer-forum/outbox.jsonl').read_text())
+        self.assertEqual(msg['as'],'buyer');self.assertIn('같은 운영자',msg['post']);self.assertIn('9,500',msg['post'])
+        self.assertFalse((self.root/'outbox.jsonl').exists())
+
+if __name__=='__main__':unittest.main()

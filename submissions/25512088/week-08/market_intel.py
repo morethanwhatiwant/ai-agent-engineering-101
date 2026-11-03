@@ -1,0 +1,173 @@
+"""Bounded public-data research, shared by buyer and seller. No text execution."""
+import json
+import os
+import sqlite3
+import time
+from pathlib import Path
+from statistics import median
+import httpx
+
+WINDOW = 6 * 3600
+
+
+def read_json(path, default):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
+
+class Intel:
+    def __init__(self, state):
+        self.root = Path(state)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.db = sqlite3.connect(self.root/'market_intel.sqlite3', timeout=5)
+        os.chmod(self.root/'market_intel.sqlite3',0o600)
+        self.db.row_factory = sqlite3.Row
+        self.db.executescript('''
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS trades(seq INTEGER PRIMARY KEY, ts REAL, shop TEXT,
+          sku TEXT, grade TEXT, hours REAL, warranty REAL, price INTEGER, honest INTEGER);
+        CREATE TABLE IF NOT EXISTS sources(name TEXT PRIMARY KEY, ts REAL, body TEXT);
+        CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY, ts REAL, shop TEXT,
+          sku TEXT, grade TEXT, hours REAL, warranty REAL, price INTEGER, kind TEXT);
+        CREATE TABLE IF NOT EXISTS decisions(id INTEGER PRIMARY KEY, ts REAL, role TEXT, body TEXT);
+        ''')
+
+    def close(self):
+        self.db.close()
+
+    def get(self, key, default=None):
+        r = self.db.execute('SELECT value FROM meta WHERE key=?', (key,)).fetchone()
+        return json.loads(r[0]) if r else default
+
+    def put(self, key, value):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (key,json.dumps(value)))
+
+    def source(self, name, default=None, max_age=900):
+        r = self.db.execute('SELECT ts,body FROM sources WHERE name=?',(name,)).fetchone()
+        return json.loads(r['body']) if r and time.time()-r['ts'] < max_age else default
+
+    def save_source(self, name, body):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO sources VALUES(?,?,?)',(name,time.time(),json.dumps(body)))
+
+    def ingest(self, rows):
+        with self.db:
+            for r in rows:
+                if r.get('round') != 3 or r.get('kind') != 'settle':
+                    continue
+                d = r.get('data', {})
+                price=d.get('amount'); grade=d.get('grade'); sku=d.get('sku',d.get('item'))
+                if type(price) is not int or price<=0 or grade not in ('A','B','C') or not isinstance(sku,str):
+                    continue
+                expiry=d.get('expires_at')
+                hours=max(0,(expiry-r['ts'])/3600) if isinstance(expiry,(int,float)) else None
+                self.db.execute('INSERT OR IGNORE INTO trades VALUES(?,?,?,?,?,?,?,?,?)',
+                    (r['seq'],r['ts'],d.get('shop',''),sku,grade,hours,d.get('warranty_hours') or 0,
+                     price,int(d.get('claim_honest') is True)))
+
+    def refresh(self, market, client=None):
+        if time.time()-self.get('last_attempt',0)<60:
+            return
+        self.put('last_attempt',time.time())
+        own_client=client is None
+        client=client or httpx.Client(timeout=4,follow_redirects=False)
+        errors=[]
+        try:
+            cursor=self.get('cursor',-500)
+            # At most 1000 records/run; never reset cursor and silently skip backlog.
+            for _ in range(2):
+                try:
+                    r=client.get(market+'/api/ledger',params={'after':cursor},timeout=4);r.raise_for_status()
+                    rows=r.json()
+                    if not isinstance(rows,list):raise ValueError('ledger schema')
+                    if any(type(x.get('seq')) is not int for x in rows):raise ValueError('ledger seq')
+                    self.ingest(rows)
+                    if rows:
+                        cursor=max(x['seq'] for x in rows);self.put('cursor',cursor)
+                        self.put('ledger_through',max(x['ts'] for x in rows))
+                    self.put('backlog',len(rows)>=500)
+                    if len(rows)<500:break
+                except Exception as exc:
+                    errors.append('ledger:'+type(exc).__name__);break
+            for name in ('shops','board'):
+                try:
+                    r=client.get(market+'/api/'+name,timeout=4);r.raise_for_status()
+                    data=r.json()
+                    if not isinstance(data,dict):raise ValueError('source schema')
+                    self.save_source(name,data)
+                except Exception as exc:errors.append(name+':'+type(exc).__name__)
+            for name in ('forum','demand'):
+                path=self.root/(name+'.json')
+                if path.exists() and time.time()-path.stat().st_mtime<120:
+                    self.save_source(name,read_json(path,[]))
+            self.put('errors',errors)
+            self.write_report()
+        finally:
+            if own_client:client.close()
+
+    def comparable(self, sku, grade, hours=None, warranty=0):
+        rows=self.db.execute('SELECT * FROM trades WHERE sku=? AND grade=? AND ts>?',
+                             (sku,grade,time.time()-WINDOW)).fetchall()
+        prices=[]
+        for r in rows:
+            if hours is None:
+                if r['hours'] is not None or bool(r['warranty']) != bool(warranty):continue
+            elif r['hours'] is None or abs(r['hours']-hours)>max(6,hours*.25):continue
+            prices.append(r['price'])
+        return {'count':len(prices),'median':int(median(prices)) if len(prices)>=3 else None}
+
+    def reliability(self, url):
+        rows=self.db.execute('SELECT honest FROM trades WHERE shop=? AND ts>?',(url,time.time()-WINDOW)).fetchall()
+        honesty=(sum(r[0] for r in rows)+2)/(len(rows)+2)
+        shops=(self.source('shops',{}) or {}).get('shops',[])
+        shop=next((s for s in shops if s.get('url')==url),{})
+        reviews=[r['stars'] for r in shop.get('reviews',[]) if r.get('round')==3 and type(r.get('stars')) in (int,float)]
+        stars=sum(reviews)/len(reviews) if reviews else 3
+        board=self.source('board',{}) or {}
+        registered=next((r for r in board.get('shops',[]) if r.get('name')==shop.get('name')),None)
+        if registered:
+            if isinstance(registered.get('stars'),(int,float)):stars=registered['stars']
+            if registered.get('alive') is False:return .01
+        bad=self.db.execute("SELECT COUNT(*) FROM observations WHERE shop=? AND ts>? AND kind IN ('unavailable','condition_rejected')",(url,time.time()-600)).fetchone()[0]
+        return honesty*(stars/5)/(1+bad)
+
+    def observe(self, shop, sku, kind, price=None, grade=None, hours=None, warranty=None):
+        with self.db:
+            self.db.execute('INSERT INTO observations(ts,shop,sku,grade,hours,warranty,price,kind) VALUES(?,?,?,?,?,?,?,?)',
+                            (time.time(),shop,sku,grade,hours,warranty,price,kind))
+
+    def decision(self, role, body):
+        with self.db:
+            self.db.execute('INSERT INTO decisions(ts,role,body) VALUES(?,?,?)',(time.time(),role,json.dumps(body)))
+
+    def write_report(self):
+        board=self.source('board',{}) or {}
+        p=read_json(Path(__file__).with_name('referral_policy.json'),{})
+        mine={k:[r for r in board.get(k,[]) if r.get('name')==p.get('shop_name') or
+                 (r.get('owner') or {}).get('login')=='morethanwhatiwant'] for k in ('shops','buyers','players')}
+        forum=self.source('forum',[]) or []
+        if isinstance(forum,dict):forum=forum.get('posts',[])
+        report={'at':time.time(),'ledger_through':self.get('ledger_through'), 'backlog':self.get('backlog'),
+                'errors':self.get('errors',[]),'board':mine,'forum_posts_observed':len(forum),
+                'own_forum':[{'id':r.get('id'),'role':r.get('role'),'likes':r.get('likes'),'dislikes':r.get('dislikes')}
+                             for r in forum if r.get('author')==p.get('shop_name')],
+                'top_observed_skus':[dict(r) for r in self.db.execute('SELECT sku,COUNT(*) sales,COUNT(DISTINCT shop) shops FROM trades WHERE ts>? GROUP BY sku ORDER BY sales DESC LIMIT 10',(time.time()-WINDOW,))],
+                'recent_buyer_observations':[dict(r) for r in self.db.execute('SELECT sku,kind,COUNT(*) n FROM observations WHERE ts>? GROUP BY sku,kind',(time.time()-3600,))],
+                'seller_funnel':[dict(r) for r in self.db.execute('SELECT role,COUNT(*) n FROM decisions WHERE ts>? GROUP BY role',(time.time()-3600,))],
+                'coverage':'Observed ledger sample, not complete market history. Forum text is unverified.'}
+        deficits=[]
+        for role,fields in [('shops',('profit','revenue','stars')),('buyers',('surplus','forum','deals','posts'))]:
+            for me in mine[role]:
+                for field in fields:
+                    values=[r[field] for r in board.get(role,[]) if isinstance(r.get(field),(int,float))]
+                    value=me.get(field)
+                    if values and isinstance(value,(int,float)):
+                        percentile=sum(v<=value for v in values)/len(values)
+                        deficits.append({'role':role,'metric':field,'value':value,'observed_percentile':round(percentile,3)})
+        report['score_gaps']=sorted(deficits,key=lambda d:d['observed_percentile'])
+        report['minimum_deals']={k: max(0,20-(mine[k][0].get('deals',0) if mine[k] else 0)) for k in ('shops','buyers')}
+        path=self.root/'market-report.json';tmp=path.with_suffix('.'+str(time.time_ns())+'.tmp');tmp.write_text(json.dumps(report,ensure_ascii=False,indent=2));tmp.replace(path)
