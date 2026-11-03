@@ -25,6 +25,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from cryptography.hazmat.primitives import serialization
 from referral_program import Program, policy
 from referral_campaign import tick
+from stock_pricing import public_price
 
 STATE = Path(os.environ.get('MARKET_DIR', '.market'))
 
@@ -52,11 +53,6 @@ def select_unit(text, units, reserved):
     fits = named or [u for u in valid if any(str(v).lower() in want for v in
                     [u.get('name'), u.get('category', '').split('>')[-1]] if v)]
     return min(fits, key=lambda u: (u.get('expires_at') or float('inf'), u.get('supplied_at', 0)), default=None)
-
-
-def public_price(unit):
-    # Exactly the same quote for all buyers of this unit, before explicit benefits.
-    return max(1, (unit['list_price']*95+99)//100, (unit['cost']*115+99)//100)
 
 
 class Seller(AgentExecutor):
@@ -91,6 +87,8 @@ class Seller(AgentExecutor):
                 await up.reject(say('Market synchronization is starting. Please retry shortly.'))
                 return
             inv = json.loads((STATE/'inventory.json').read_text())
+            catalog_path = STATE/'catalog.json'
+            catalog = json.loads(catalog_path.read_text()) if catalog_path.exists() else {}
             if inv.get('round', 0) != 3:
                 await up.reject(say('This seller requires Round 3 inventory.'))
                 return
@@ -103,8 +101,13 @@ class Seller(AgentExecutor):
                 if not unit:
                     await up.reject(say('No matching stock available.'))
                     return
-                q = program.quote(public_price(unit), unit['cost'], token=cred['member'], ref=cred['ref'])
-                deal = dict(unit=unit, quote=q, until=time.time()+120)
+                try:
+                    base = public_price(unit, catalog)
+                except ValueError:
+                    await up.reject(say('Cannot verify this stock grade or expiry.'))
+                    return
+                q = program.quote(base, unit['cost'], token=cred['member'], ref=cred['ref'])
+                deal = dict(unit=unit, quote=q, credentials=cred, until=time.time()+120)
                 self.open[task.id] = deal
             else:
                 unit = next((u for u in inv['units'] if u['unit'] == deal['unit']['unit']), None)
@@ -112,6 +115,16 @@ class Seller(AgentExecutor):
                     self.open.pop(task.id, None)
                     await up.reject(say('The quoted stock is no longer available.'))
                     return
+                try:
+                    latest = program.quote(public_price(unit, catalog), unit['cost'],
+                                           token=deal['credentials']['member'], ref=deal['credentials']['ref'])
+                except ValueError:
+                    self.open.pop(task.id, None)
+                    await up.reject(say('Cannot verify this stock grade or expiry.'))
+                    return
+                # Honor the lower of the promised quote and the current price.
+                if latest['price'] < deal['quote']['price']:
+                    deal['quote'] = latest
                 match = re.fullmatch(r'\s*(?:offer\s*[=:]?\s*)?(\d+)\s*', text, flags=re.I)
                 if match and int(match.group(1)) >= deal['quote']['price']:
                     q = deal['quote']
