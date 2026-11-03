@@ -10,6 +10,20 @@ from referral_program import Program
 
 
 class SellerIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    def test_stock_miss_distinguishes_reserved_without_logging_secrets(self):
+        u=dict(unit='u',sku='G00001',name='item',category='food',grade='A',expires_at=None)
+        catalog={'G00001':dict(category='food')}
+        result=referral_seller.stock_miss('G00001 member=SECRET ref=REF-PRIVATE',[u],{'u'},catalog)
+        self.assertEqual(result['reason'],'reserved')
+        self.assertEqual(result['skus'],['G00001'])
+        self.assertNotIn('SECRET',json.dumps(result))
+        self.assertNotIn('REF-PRIVATE',json.dumps(result))
+        hidden=referral_seller.stock_miss('food member=G00001',[],set(),catalog)
+        self.assertEqual(hidden['skus'],[])
+        missing=referral_seller.stock_miss('food',[],set(),catalog)
+        self.assertEqual(missing['categories'],['food'])
+        self.assertEqual(missing['reason'],'unavailable_or_unmatched')
+
     async def test_a2a_quote_signed_artifact_and_private_enrollment(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = Path(tmp)

@@ -59,6 +59,19 @@ def select_unit(text, units, reserved):
     return min(fits, key=lambda u: (u.get('expires_at') or float('inf'), u.get('supplied_at', 0)), default=None)
 
 
+def stock_miss(text, units, reserved, catalog):
+    """Record canonical demand only, never raw messages or bearer credentials."""
+    clean=re.sub(r'\b(?:ref|member)=[A-Za-z0-9_-]+', '', text)
+    skus=sorted({sku for sku in catalog if sku.lower() in clean.lower()})[:20]
+    categories=sorted({p.get('category','') for p in catalog.values()
+                       if p.get('category') and p['category'].split('>')[-1].lower() in clean.lower()})[:20]
+    held_match=select_unit(clean,units,set())
+    return dict(skus=skus,categories=categories,
+                reason='reserved' if held_match and held_match['unit'] in reserved else 'unavailable_or_unmatched',
+                inventory_units=len(units),
+                reserved_units=sum(u['unit'] in reserved for u in units))
+
+
 class Seller(AgentExecutor):
     def __init__(self):
         self.open = {}
@@ -115,7 +128,7 @@ class Seller(AgentExecutor):
                 reserved = program.reserved_units() | {v['unit']['unit'] for v in self.open.values()}
                 unit = select_unit(text, inv['units'], reserved)
                 if not unit:
-                    intel.decision('seller_no_stock',{'task':task.id})
+                    intel.decision('seller_no_stock',dict(task=task.id,**stock_miss(text,inv['units'],reserved,catalog)))
                     await up.reject(say('No matching stock available.'))
                     return
                 try:
