@@ -15,6 +15,7 @@ import uuid
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
 from buyer_memory import Memory
 
 
@@ -43,6 +44,20 @@ def limit(order, product, grade=None):
     rates = {'A':95, 'B':80, 'C':60}
     pct = rates.get(grade, 75 if order.get('kind')=='food' else 60)
     return min(order['budget'], math.floor(product['list_price']*pct/100))
+
+
+def own_shop_identity():
+    base = Path(__file__).resolve().parent
+    name = json.loads((base / 'referral_policy.json').read_text())['shop_name']
+    key = serialization.load_pem_private_key((base / 'shop_key.pem').read_bytes(), password=None)
+    pub = base64.b64encode(key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+    return name, pub
+
+
+def exclude_own_shop(shops, name, pubkey):
+    # Name blocks the registered shop; key also blocks renamed shops/new tunnels.
+    return [s for s in shops if s.get('name') != name and s.get('pubkey') != pubkey]
 
 
 def candidates(order, shops, catalog, memory):
@@ -231,6 +246,7 @@ def main():
                 keys={(s['url'],s['name']):s['pubkey'] for s in registry.json()['shops']}
                 shops=json.loads(Path(args.shops).read_text())
                 shops=[dict(s,pubkey=keys[(s['url'],s['name'])]) for s in shops if (s['url'],s['name']) in keys]
+                shops=exclude_own_shop(shops, *own_shop_identity())
                 out=Buyer(order,memory,client,json.loads((Path(args.state)/'catalog.json').read_text())).run(
                     shops)
         print(json.dumps(out,ensure_ascii=False),flush=True)

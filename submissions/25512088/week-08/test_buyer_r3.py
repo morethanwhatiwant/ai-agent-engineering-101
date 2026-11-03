@@ -8,7 +8,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from buyer_memory import Memory
-from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt
+from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt, exclude_own_shop
 from buyer_review import review
 
 
@@ -52,6 +52,14 @@ class BuyerTests(unittest.TestCase):
     def test_only_three_shops_with_acceptable_stock(self):
         shops=[dict(self.shop,name=str(i)) for i in range(8)]+[dict(self.shop,name='bad',offers=[dict(sku='wrong',qty=1)])]
         self.assertEqual(len(candidates(self.o,shops,self.cat,self.m)),3)
+
+    def test_own_shop_excluded_by_name_or_key_before_ranking(self):
+        own = dict(self.shop, name='25512088', pubkey='own')
+        renamed = dict(own, name='renamed', url='https://new-tunnel.test')
+        changed_key = dict(own, pubkey='different')
+        shops = exclude_own_shop([own, renamed, changed_key, self.shop], '25512088', 'own')
+        self.assertEqual(shops, [self.shop])
+        self.assertEqual(candidates(self.o, shops, self.cat, self.m)[0][0], self.shop)
 
     def test_numbers_in_sku_and_expiry_are_not_quotes(self):
         self.assertIsNone(asking('SKU123 10개 48 hours'))

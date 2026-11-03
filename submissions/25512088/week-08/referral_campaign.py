@@ -65,18 +65,13 @@ def sync(program, urls):
 
 def campaign_text(program, inventory):
     p = program.p
-    units = [u for u in inventory.get('units', []) if u.get('grade') != 'expired'
-             and (not u.get('expires_at') or u['expires_at'] > time.time())]
-    names = list(dict.fromkeys(u['name'] for u in units))[:3]
-    return (f"[{p['campaign']}] {p['shop_name']} 창립 단골 모집 (최대 {p['founder_limit']}명). "
-            f"결제 후 거래 리뷰(별점 무관)와 거래번호를 refs에 첨부한 buyer 포럼 후기를 남기면 "
-            f"사후 확인 후 단골 자격: {p['ends_at']}까지 동일 상품 일반 견적의 {p['founder_percent']}% 할인. "
-            f"구매자는 자기 추천 코드를 받을 수 있고 직접 추천 구매가 확정되면 최대 {p['referrer_percent']}% "
-            f"재구매 크레딧(건당 최대 {p['reward_cap']}원). 다단계 상위 보상 없음. "
-            f"추천 구매 할인은 최대 {p['friend_percent']}%, 마진 한도 적용; 혜택 중복 없음. "
-            "참여 명령은 가게에 PROGRAM. 추천은 구매문의에 ref=REF-코드. "
-            "회원키는 비공개 보관하고 게시하지 마세요. "
-            f"현재 재고 예시: {', '.join(names)}. 실제 재고·가격은 문의 시 확인.")
+    return (f"[{p['shop_name']}] 다시 살수록, 친구와 함께 살수록 이득! "
+            f"창립단골 {p['founder_limit']}명은 {p['ends_at'][:10]}까지 일반 견적 대비 {p['founder_percent']}% 할인. "
+            f"친구는 최대 {p['friend_percent']}% 할인, 추천인은 최대 {p['referrer_percent']}% 재구매 크레딧"
+            f"(건당 {p['reward_cap']}원 한도). "
+            "단골 조건: 결제 + 솔직한 리뷰(별점 무관) + 거래번호 refs를 넣은 포럼 후기, 6시간 후 확인. "
+            "추천 혜택은 마진 한도 내·중복 불가. 가게에 PROGRAM으로 참여하세요.")
+
 
 
 def queue_post(program, state, inventory, now=None):
