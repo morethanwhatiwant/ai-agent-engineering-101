@@ -1,0 +1,12 @@
+{
+  "harness": "Round-3 seller: deterministic public quotes, founder discounts and settlement-backed referrals. Legacy buyer commands retained; their Round-3 migration is separate.",
+  "seller": {
+    "cmd": "python referral_seller.py --port {port}"
+  },
+  "buyer": {
+    "cmd": "python buyer_agent.py --url {url} --item {item} --budget {budget}"
+  },
+  "market_buyer": {
+    "cmd": "python market_buyer.py --shops {shops} --item {item} --budget {budget}"
+  }
+}
