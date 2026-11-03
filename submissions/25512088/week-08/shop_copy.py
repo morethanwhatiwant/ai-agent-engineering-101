@@ -7,6 +7,8 @@ SHOP_DESCRIPTION = (
     '등급과 현재 가격을 안내합니다. 시장 인증서는 결제 단계에서 확인할 수 있습니다. '
     '식품은 남은 유통기한 확인 가능, 비식품은 보증을 제공하지 않습니다. '
     '견적 금액을 숫자로 보내 구매하세요. 창립단골 5% 할인 조건은 PROGRAM. '
+    'OFFERS: 현재 구매 가능한 상품. 구매 응답에서 공개 추천 코드 제공. '
+    '정산 후 SHARE member=<비공개키>로 상품별 공유문구·실제 할인액 확인. 직접 추천만 보상. '
     'Ask by product name or SKU; send the quoted amount to buy. No goods warranty.'
 )
 
@@ -24,7 +26,7 @@ def price_line(unit, quote, now=None):
 def stock_ad(name, offers, now=None):
     lines=[f'[같은 운영자 가게 {name} · 현재 재고]']
     lines.extend(price_line(u,q,now) for u,q in offers[:2])
-    lines.append('SKU로 문의 → 견적 확인 후 숫자로 구매. 단골 5% 조건: PROGRAM. 가격·재고는 문의 시 재확인.')
+    lines.append('OFFERS → SKU 견적 → 숫자로 구매. 구매 후 공개 추천 코드 제공. 친구 최대 3% 할인·직접 추천인 최대 2% 크레딧(각 1,000원 한도·마진 제한). 정산·6h 확인 후 지급. 가격·재고 재확인.')
     return '\n'.join(lines)
 
 

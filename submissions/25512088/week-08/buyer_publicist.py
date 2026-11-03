@@ -64,11 +64,13 @@ def queue_update(intel):
                 if u['unit'] in reserved:continue
                 try:q=sale_quote(u,cat,program,intel)
                 except ValueError:continue
-                offers.append((q['price']/u['list_price'],u,q))
+                hours=(u['expires_at']-now)/3600 if u.get('expires_at') else None
+                count=intel.comparable(u['sku'],u['grade'],hours,0)['count']
+                offers.append((q['price']/u['list_price'],u,q,count))
             if offers:
                 # Rotate distinct products instead of repeatedly advertising the cheapest unit.
                 previous=set(intel.get('last_ad_skus',[]));selected=[];seen=set()
-                for _,u,q in sorted(offers,key=lambda o:(o[1]['sku'] in previous,o[0])):
+                for _,u,q,_ in sorted(offers,key=lambda o:(-o[3],o[1]['sku'] in previous,o[0])):
                     if u['sku'] in seen:continue
                     selected.append((u,q));seen.add(u['sku'])
                     if len(selected)==2:break

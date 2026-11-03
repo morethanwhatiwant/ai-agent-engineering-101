@@ -29,6 +29,7 @@ from stock_pricing import public_price
 from seller_strategy import sale_quote
 from market_intel import Intel
 from shop_copy import SHOP_DESCRIPTION
+from growth_offers import offers
 
 STATE = Path(os.environ.get('MARKET_DIR', '.market'))
 
@@ -73,6 +74,17 @@ class Seller(AgentExecutor):
         program = Program(STATE)
         intel = Intel(STATE)
         try:
+            if program.get('growth_started_at') is None:
+                program.put('growth_started_at',time.time())
+            if text.strip().upper()=='OFFERS' or text.upper().startswith('SHARE '):
+                sharing=text.upper().startswith('SHARE ')
+                member=program.member(cred['member']) if sharing else None
+                if sharing and not member:
+                    await up.complete(say('SHARE requires your private member key after settlement. Never publish that key.'))
+                    return
+                program.growth_event(task.id,'share' if member else 'offers')
+                await up.complete(say(json.dumps(offers(STATE,program,intel,ref=member['code'] if member else ''),ensure_ascii=False)))
+                return
             if text.strip().upper() == 'PROGRAM':
                 p = program.p
                 await up.complete(say(
@@ -112,6 +124,9 @@ class Seller(AgentExecutor):
                     await up.reject(say('Cannot verify this stock grade or expiry.'))
                     return
                 deal = dict(unit=unit, quote=q, credentials=cred, until=time.time()+120)
+                program.growth_event(task.id,'quote')
+                if cred['ref']:program.growth_event(task.id,'ref_inquiry')
+                if q['referrer']:program.growth_event(task.id,'ref_quote')
                 self.open[task.id] = deal
             else:
                 unit = next((u for u in inv['units'] if u['unit'] == deal['unit']['unit']), None)
@@ -142,9 +157,13 @@ class Seller(AgentExecutor):
                                         task=task.id, unit=unit['unit'], cert=True))
                     await up.add_artifact(parts=[new_data_part(receipt)], name='receipt')
                     private = (f' Private provisional member key: {secret}. Save privately; never post it. '
-                               'After payment use STATUS member=<key> for your referral code.') if secret else ''
+                               'After payment use SHARE member=<key> for current product referral offers.') if secret else ''
+                    code=program.purchase_code(task.id)
+                    public=(f' Public referral code: {code} (activates after settlement). '
+                            f'Friend sends: I want to buy {unit["sku"]} ref={code}. '
+                            'Stock and price must be reconfirmed. Direct referrals only; no review or forum post required for referrals.')
                     intel.decision('seller_signed',{'sku':unit['sku'],'price':q['price'],'cost':unit['cost']})
-                    await up.complete(say(f"Agreed at {q['price']}. Membership activates only after market settlement."+private))
+                    await up.complete(say(f"Agreed at {q['price']}. Membership activates only after market settlement."+public+private))
                     self.open.pop(task.id, None)
                     return
             q = deal['quote']

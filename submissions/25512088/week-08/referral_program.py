@@ -36,6 +36,8 @@ class Program:
           refunded INTEGER DEFAULT 0, reviewed INTEGER DEFAULT 0,
           posted INTEGER DEFAULT 0, awarded INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE IF NOT EXISTS growth_events(
+          task TEXT, event TEXT, ts REAL, PRIMARY KEY(task,event));
         ''')
         frozen = self.get('policy_snapshot')
         if frozen is not None and frozen != self.p:
@@ -46,6 +48,14 @@ class Program:
 
     def close(self):
         self.db.close()
+
+    def growth_event(self, task, event):
+        with self.db:
+            self.db.execute('INSERT OR IGNORE INTO growth_events VALUES(?,?,?)', (task,event,time.time()))
+
+    def purchase_code(self, task):
+        row=self.db.execute('SELECT m.code FROM members m JOIN sales s ON s.member=m.id WHERE s.task=?',(task,)).fetchone()
+        return row[0] if row else None
 
     def live(self, now=None):
         return (time.time() if now is None else now) < datetime.fromisoformat(self.p['ends_at']).timestamp()

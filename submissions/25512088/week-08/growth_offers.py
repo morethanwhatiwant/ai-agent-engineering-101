@@ -1,0 +1,33 @@
+"""Fresh, cost-protected product discovery and voluntary sharing."""
+import json
+import time
+from seller_strategy import sale_quote
+
+
+def offers(state, program, intel, ref='', limit=3):
+    path=state/'inventory.json'
+    if not path.exists() or time.time()-path.stat().st_mtime>90:return []
+    inv=json.loads(path.read_text())
+    if inv.get('round')!=3:return []
+    cp=state/'catalog.json'
+    catalog=json.loads(cp.read_text()) if cp.exists() else {}
+    reserved=program.reserved_units(); ranked=[]
+    for u in inv.get('units',[]):
+        if u['unit'] in reserved:continue
+        try:q=sale_quote(u,catalog,program,intel,ref=ref)
+        except ValueError:continue
+        hours=(u['expires_at']-time.time())/3600 if u.get('expires_at') else None
+        count=intel.comparable(u['sku'],u['grade'],hours,0)['count']
+        ranked.append((count,u,q))
+    ranked.sort(key=lambda x:x[0],reverse=True)
+    result=[];seen=set()
+    for count,u,q in ranked:
+        if u['sku'] in seen:continue
+        seen.add(u['sku'])
+        result.append(dict(sku=u['sku'],name=u['name'],grade=u['grade'],price=q['price'],
+            friend_discount=q['base']-q['price'],referrer_credit=q['reward'],
+            warranty_hours=0,expires_at=u.get('expires_at'),
+            message=f"I want to buy {u['sku']}"+(f' ref={ref}' if ref else ''),
+            conditions='Requote before buying. Direct referrals only; credit after settlement and 6-hour hold. No reward for refunds.'))
+        if len(result)>=limit:break
+    return result
