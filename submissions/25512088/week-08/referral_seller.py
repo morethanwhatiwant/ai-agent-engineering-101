@@ -28,7 +28,7 @@ from referral_campaign import tick
 from stock_pricing import public_price, receipt_grade
 from seller_strategy import sale_quote, negotiate
 from market_intel import Intel
-from shop_copy import SHOP_DESCRIPTION
+from shop_copy import SHOP_DESCRIPTION, SHOP_DISPLAY_NAME
 from growth_offers import offers
 from procurement_campaign import settings
 
@@ -166,6 +166,10 @@ class Seller(AgentExecutor):
                         token=deal['credentials']['member'],ref=deal['credentials']['ref'])
                 if match and int(match.group(1)) >= deal['quote']['price']:
                     q = deal['quote']
+                    claim = receipt_grade(unit, catalog)
+                    if claim not in ('A', 'B', 'C'):
+                        await up.reject(say('Grade could not be verified. No receipt issued.'))
+                        return
                     try:
                         secret = program.accept(task.id, unit['unit'], unit['sku'], unit['cost'], q, inventory=inv)
                     except (ValueError, sqlite3.IntegrityError):
@@ -174,8 +178,7 @@ class Seller(AgentExecutor):
                         return
                     terms=dict(shop=program.p['shop_name'], item=unit['sku'], price=q['price'],
                                task=task.id, unit=unit['unit'], cert=True,warranty_hours=q.get('warranty_hours',0))
-                    claim=receipt_grade(unit,catalog)
-                    if claim is not None:terms['claim']=claim
+                    terms['claim'] = claim
                     receipt = sign(terms)
                     await up.add_artifact(parts=[new_data_part(receipt)], name='receipt')
                     private = (f' Private provisional member key: {secret}. Save privately; never post it. '
@@ -233,11 +236,11 @@ def build(port, publish=True):
                 await worker
             except asyncio.CancelledError:
                 pass
-    card = AgentCard(name=policy()['shop_name'], description=SHOP_DESCRIPTION,
-        version='1.1.0', default_input_modes=['text/plain'], default_output_modes=['application/json','text/plain'],
+    card = AgentCard(name=SHOP_DISPLAY_NAME, description=SHOP_DESCRIPTION,
+        version='1.2.0', default_input_modes=['text/plain'], default_output_modes=['application/json','text/plain'],
         capabilities=AgentCapabilities(streaming=False), supported_interfaces=[AgentInterface(
             protocol_binding='JSONRPC', url=f'http://127.0.0.1:{port}/', protocol_version='1.0')],
-        skills=[AgentSkill(id='shop', name='Check stock and buy', description='Send a product name or SKU to get current price and grade; send the quoted amount to purchase. PROGRAM explains optional loyalty benefits.',
+        skills=[AgentSkill(id='shop', name='Check stock and buy', description='Ask by SKU; reply with a numeric offer on the same task. Returns actual grade, cert=true, warranty_hours=6 and a signed receipt.',
                            tags=['shopping','stock','price'], examples=['I want to buy <SKU>', 'PROGRAM'])])
     handler = DefaultRequestHandler(agent_executor=Seller(), task_store=InMemoryTaskStore(), agent_card=card)
     return Starlette(routes=create_agent_card_routes(card)+create_jsonrpc_routes(handler, '/'), lifespan=lifespan)

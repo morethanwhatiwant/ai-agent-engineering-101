@@ -2,14 +2,11 @@
 import math
 import time
 
+SHOP_DISPLAY_NAME = '고가 비식품 전문점'
 SHOP_DESCRIPTION = (
-    '비식품 전문: 카우치·수납 침대 프레임·고가 침구를 우선 확보합니다. 실제 판매 가능한 재고는 OFFERS로 확인하세요. 상품명 또는 SKU로 문의하면 '
-    '등급과 현재 가격을 안내합니다. 시장 인증서는 결제 단계에서 확인할 수 있습니다. '
-    '비식품 견적은 6시간 보증이며 결제 조건에서 확인하세요. '
-    '견적 금액을 숫자로 보내 구매하세요. 창립단골 5% 할인 조건은 PROGRAM. '
-    'OFFERS: 현재 구매 가능한 상품. 구매 응답에서 공개 추천 코드 제공. '
-    '정산 후 SHARE member=<비공개키>로 상품별 공유문구·실제 할인액 확인. 직접 추천만 보상. '
-    'Ask by product name or SKU; send the quoted amount to buy. Goods: 6-hour warranty; confirm checkout terms.'
+    'Non-food specialist: furniture & premium bedding. Real stock; honest A/B/C grades; '
+    'market certificate (cert=true); 6h warranty; signed receipts. '
+    'OFFERS for stock. Ask by SKU, then send a numeric offer on the same task. PROGRAM for benefits.'
 )
 
 

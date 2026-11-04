@@ -96,6 +96,31 @@ class SellerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     try:self.assertEqual(program.db.execute('select amount from warranties').fetchone()[0],15000)
                     finally:program.close()
 
+    async def test_unverified_grade_never_reserves_or_issues_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state=Path(tmp)
+            (state/'inventory.json').write_text(json.dumps(dict(round=3,start=5000000,balance=5000000,units=[dict(
+                unit='goods-u',sku='G99999',name='chair',category='chair',kind='goods',cost=6000,
+                list_price=20000,grade='B',expires_at=None,supplied_at=time.time())])))
+            program=Program(state);program.put('cursor',100);program.close()
+            with patch.object(referral_seller,'STATE',state),patch.object(referral_seller,'sign',side_effect=lambda r:dict(r,sig_seller='test-only')):
+                app=referral_seller.build(9301,publish=False)
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url='http://test') as c:
+                    async def send(text,task=None):
+                        msg=dict(role='ROLE_USER',messageId=str(time.time_ns()),parts=[dict(text=text)])
+                        if task:msg['taskId']=task
+                        response=await c.post('/',headers={'A2A-Version':'1.0'},json=dict(jsonrpc='2.0',id='1',method='SendMessage',params=dict(message=msg)))
+                        body=response.json()['result'];return body.get('task',body)
+                    quote=await send('G99999')
+                    self.assertIn('warranty 6 h',json.dumps(quote))
+                    with patch.object(referral_seller, 'receipt_grade', return_value=None):
+                        done=await send('15000',quote['id'])
+                    self.assertIn('REJECTED', done['status']['state'])
+                    self.assertNotIn('artifacts', done)
+                    program=Program(state)
+                    try:self.assertEqual(program.db.execute('select count(*) from sales').fetchone()[0],0)
+                    finally:program.close()
+
 
 if __name__ == '__main__':
     unittest.main()
