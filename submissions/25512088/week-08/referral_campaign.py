@@ -1,3 +1,4 @@
+from procurement_campaign import settings
 """Read public market evidence and queue shop recruitment posts through kit v4.
 
 No standalone HTTP publishing: the kit owns authentication and forum rate limits.
@@ -68,7 +69,7 @@ def campaign_text(program, inventory):
     p=program.p;lines=[f"[{p['shop_name']} · 실제 재고 / 시장 인증서]"]
     held=program.reserved_units()
     for u in inventory.get('units',[]):
-        if u.get('unit') in held:continue
+        if u.get('unit') in held or (settings().get('goods_only') and u.get('kind')!='goods'):continue
         try:q=sale_quote(u,{},program)
         except (KeyError,ValueError):continue
         condition=f"보증 {q['warranty_hours']}h" if q.get('warranty_hours') else '식품 남은 기한 문의'
@@ -82,7 +83,7 @@ def campaign_text(program, inventory):
 def queue_post(program, state, inventory, now=None):
     now = time.time() if now is None else now
     held=program.reserved_units()
-    available = [u for u in inventory.get('units', []) if u.get('unit') not in held and u.get('grade') != 'expired'
+    available = [u for u in inventory.get('units', []) if u.get('unit') not in held and (not settings().get('goods_only') or u.get('kind')=='goods') and u.get('grade') != 'expired'
                  and (not u.get('expires_at') or u['expires_at'] > now)]
     if inventory.get('round', 0) < 3 or not available or not program.live(now):
         return False

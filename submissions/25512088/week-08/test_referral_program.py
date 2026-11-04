@@ -111,7 +111,7 @@ class ReferralTests(unittest.TestCase):
         self.assertEqual(self.program.quote(10000, 8000, ref=self.program.status(a)['referral_code'])['price'],10000)
 
     def test_forum_queue_has_limit_and_never_posts_as_buyer(self):
-        inv = {'round': 3, 'units': [{'name': '김치', 'grade': 'A'}]}
+        inv = {'round': 3, 'units': [{'name': 'chair', 'grade': 'A', 'kind': 'goods'}]}
         self.assertTrue(queue_post(self.program, self.tmp.name, inv, now=10000))
         self.assertFalse(queue_post(self.program, self.tmp.name, inv, now=10001))
         rows = (Path(self.tmp.name)/'outbox.jsonl').read_text().splitlines()

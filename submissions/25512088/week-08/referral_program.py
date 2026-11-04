@@ -119,7 +119,8 @@ class Program:
             if q.get('warranty_hours'):
                 if inventory is None:raise ValueError('Missing warranty cash evidence')
                 exposure=self.db.execute('SELECT COALESCE(SUM(w.amount),0) FROM warranties w JOIN sales s ON s.task=w.task WHERE s.refunded=0 AND (s.settled IS NULL OR s.settled>?)',(time.time()-21600,)).fetchone()[0]
-                reserve=max(500000,inventory.get('start',5000000)*.5)
+                from procurement_campaign import reserve_cash
+                reserve=reserve_cash(inventory)
                 if inventory.get('balance',0)-exposure-q['price']<reserve:raise ValueError('Warranty reserve unavailable')
                 self.db.execute('INSERT INTO warranties VALUES(?,?,?)',(task,q['price'],time.time()))
             mid = q['member']

@@ -8,6 +8,7 @@ from statistics import median
 import time
 from market_intel import Intel, read_json, WINDOW
 from stock_pricing import public_price
+from procurement_campaign import settings
 
 
 def cost_floor(cost, policy):
@@ -98,6 +99,8 @@ def graded_demand(sku, product, intel, now):
 
 def restock_plan(inv,catalog,intel,now=None):
     now=time.time() if now is None else now
+    if settings().get('external_campaign'):
+        return {'buy':[], 'reason':'authorized_goods_campaign_worker', 'budget':settings()['budget']}
     if inv.get('round')!=3 or not inv.get('restock',{}).get('open'):
         return {'buy':[], 'reason':'supply_closed'}
     stock=inv.get('units',[]);slots=max(0,24-len(stock))  # Four bounded trial slots.

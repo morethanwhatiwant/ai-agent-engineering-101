@@ -53,7 +53,8 @@ class IntelligenceTests(unittest.TestCase):
             for token,code in [('', ''),(key,''),('',ref)]:
                 q=sale_quote(dict(self.u,cost=cost),{},self.p,self.i,token,code)
                 self.assertGreaterEqual(q['price']-q['reward'],cost+__import__('math').ceil(cost*.09))
-    def test_restock_window_cash_evidence_and_stock_limits(self):
+    @patch("seller_strategy.settings", return_value={"external_campaign": False})
+    def test_restock_window_cash_evidence_and_stock_limits(self, _policy):
         self.i.ingest(self.rows());self.i.put('ledger_through',time.time())
         inv=dict(round=3,restock={'open':True},balance=5000000,start=5000000,units=[])
         cat={'x':dict(list_price=10000,category='c')}

@@ -1,0 +1,8 @@
+{
+  "campaign": "goods-gap-20261104",
+  "budget": 2500000,
+  "cash_floor": 500000,
+  "goods_only": true,
+  "external_campaign": true,
+  "priority": ["Gd1e861c7", "G1a265ca2", "G6b0fd5bc", "Gea0cca52"]
+}

@@ -30,6 +30,7 @@ from seller_strategy import sale_quote, negotiate
 from market_intel import Intel
 from shop_copy import SHOP_DESCRIPTION
 from growth_offers import offers
+from procurement_campaign import settings
 
 STATE = Path(os.environ.get('MARKET_DIR', '.market'))
 
@@ -126,7 +127,8 @@ class Seller(AgentExecutor):
             deal = self.open.get(task.id)
             if not deal:
                 reserved = program.reserved_units() | {v['unit']['unit'] for v in self.open.values()}
-                unit = select_unit(text, inv['units'], reserved)
+                eligible=[u for u in inv['units'] if not settings().get('goods_only') or u.get('kind')=='goods']
+                unit = select_unit(text, eligible, reserved)
                 if not unit:
                     intel.decision('seller_no_stock',dict(task=task.id,**stock_miss(text,inv['units'],reserved,catalog)))
                     available=offers(STATE,program,intel,limit=2)
