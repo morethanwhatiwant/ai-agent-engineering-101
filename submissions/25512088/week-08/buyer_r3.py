@@ -69,14 +69,36 @@ def candidates(order, shops, catalog, memory, intel=None):
                    and o['sku'] in catalog and catalog[o['sku']].get('list_price',0)>0]
         if not options:
             continue
-        # Prefer SKUs with prior paid evidence; otherwise affordable catalog value.
-        offer = min(options, key=lambda o: (
-            memory.reference(shop['url'],o['sku']) or catalog[o['sku']]['list_price']))
-        reference = memory.reference(shop['url'],offer['sku'])
         reliability = intel.reliability(shop['url']) if intel else 1
-        ranked.append(((reference or catalog[offer['sku']]['list_price']) / max(.1,reliability), shop['name'],shop,offer))
-    ranked.sort(key=lambda r:(r[0],r[1]))
+        alternatives=[]
+        for offer in options:
+            product=catalog[offer['sku']]
+            reference=memory.reference(shop['url'],offer['sku'])
+            # No paid evidence: explicit price prior, not a learned quote.
+            estimate=reference or product['list_price']*(.75 if order.get('kind')=='food' else .60)
+            cap=limit(order,product)
+            # Above-cap prices may negotiate down, but must not look affordable
+            # simply because we clipped the estimate to our budget.
+            score=surplus_score(product['list_price'],estimate,reliability)*min(1,cap/estimate)
+            alternatives.append((-score,estimate,offer['sku'],offer))
+        best=min(alternatives,key=lambda r:r[:3])
+        ranked.append((best[0],shop['name'],shop,best[3]))
+    ranked.sort(key=lambda r:(r[0],r[1],r[3]['sku']))
     return [(r[2],r[3]) for r in ranked[:3]]
+
+
+def surplus_score(value, price, reliability=1):
+    # Market value is list price when conditions hold. Reliability is a ranking
+    # weight, NOT a calibrated probability; breakage rates are unpublished.
+    return max(0,value-price)*max(0,min(1,reliability))
+
+
+def quote_rank(session, catalog, intel=None):
+    reliability=intel.reliability(session['shop']['url']) if intel else 1
+    ask=session['ask']
+    return (ask>session['cap'],
+            -surplus_score(catalog[session['sku']]['list_price'],ask,reliability),
+            ask,session['shop']['name'],session['sku'])
 
 
 def signed_receipt(task, shop, sku, maximum, task_id):
@@ -204,8 +226,12 @@ class Buyer:
                 except Exception as exc:
                     if self.intel:self.intel.observe(shop['url'],sku,'unavailable')
                     self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unavailable',details={'error':type(exc).__name__})
-            # Compare prices relative to each exact product's catalog value.
-            quotes.sort(key=lambda s:s['ask']/self.catalog[s['sku']]['list_price'])
+            # Feasible quotes first, then absolute surplus weighted by evidence.
+            quotes.sort(key=lambda s:quote_rank(s,self.catalog,self.intel))
+            self.m.record(self.o['order'],'','',None,'selection_v2',details={
+                'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],
+                    'ask':s['ask'],'cap':s['cap'],
+                    'weighted_surplus':-quote_rank(s,self.catalog,self.intel)[1]} for s in quotes]})
             if not quotes:
                 self.m.state(self.o['order'],'no_quote')
                 return self.result()

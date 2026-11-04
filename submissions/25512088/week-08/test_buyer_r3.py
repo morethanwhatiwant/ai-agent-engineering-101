@@ -8,7 +8,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from buyer_memory import Memory
-from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt, exclude_own_shop
+from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt, exclude_own_shop, quote_rank
 from buyer_review import review
 
 
@@ -60,6 +60,29 @@ class BuyerTests(unittest.TestCase):
         shops = exclude_own_shop([own, renamed, changed_key, self.shop], '25512088', 'own')
         self.assertEqual(shops, [self.shop])
         self.assertEqual(candidates(self.o, shops, self.cat, self.m)[0][0], self.shop)
+
+    def test_candidates_compare_all_skus_within_each_shop(self):
+        catalog=dict(self.cat,SKU2=dict(name='larger',list_price=20000))
+        order=dict(self.o,acceptable=['SKU1','SKU2'],budget=20000)
+        shop=dict(self.shop,offers=self.shop['offers']+[dict(sku='SKU2',qty=1)])
+        self.assertEqual(candidates(order,[shop],catalog,self.m)[0][1]['sku'],'SKU2')
+
+    def test_absolute_surplus_beats_discount_ratio(self):
+        cat={'small':dict(list_price=10000),'large':dict(list_price=30000)}
+        small=dict(shop=self.shop,sku='small',ask=5000,cap=9000)
+        large=dict(shop=self.shop,sku='large',ask=18000,cap=20000)
+        self.assertEqual(sorted([small,large],key=lambda s:quote_rank(s,cat))[0],large)
+        # An unaffordable quote must not displace an immediately feasible one.
+        large['cap']=17000
+        self.assertEqual(sorted([small,large],key=lambda s:quote_rank(s,cat))[0],small)
+
+    def test_reliability_weight_can_downrank_high_surplus(self):
+        class Evidence:
+            def reliability(self,url):return .1 if url=='https://bad.test' else 1
+        cat={'small':dict(list_price=10000),'large':dict(list_price=30000)}
+        small=dict(shop=self.shop,sku='small',ask=5000,cap=9000)
+        large=dict(shop=dict(self.shop,url='https://bad.test'),sku='large',ask=18000,cap=20000)
+        self.assertLess(quote_rank(small,cat,Evidence()),quote_rank(large,cat,Evidence()))
 
     def test_numbers_in_sku_and_expiry_are_not_quotes(self):
         self.assertIsNone(asking('SKU123 10개 48 hours'))
