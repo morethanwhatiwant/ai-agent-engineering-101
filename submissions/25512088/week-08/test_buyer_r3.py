@@ -184,6 +184,7 @@ class BuyerTests(unittest.TestCase):
 
     def test_rejected_candidate_falls_back_but_unknown_offer_stops(self):
         for uncertain in (False,True):
+            with self.m.db:self.m.db.execute('DELETE FROM rival_visits')
             order=dict(self.o,order='fallback'+str(uncertain))
             self.m.begin(order);offers=[]
             other=dict(self.shop,name='other',url='https://other.test')
@@ -204,6 +205,25 @@ class BuyerTests(unittest.TestCase):
                 out=Buyer(order,self.m,c,self.cat).run([self.shop,other])
             self.assertEqual(offers,['shop.test'] if uncertain else ['shop.test','other.test'])
             self.assertEqual(out['receipt'] is None,uncertain)
+
+    def test_negotiation_continues_beyond_two_offers_without_exceeding_cap(self):
+        amounts=[]
+        def handler(req):
+            if req.method=='GET':return httpx.Response(200,json={'supportedInterfaces':[]})
+            b=json.loads(req.content)
+            if b['method']=='CancelTask':return httpx.Response(200,json={'result':{}})
+            text=b['params']['message']['parts'][0]['text']
+            if text.isdigit():amounts.append(int(text))
+            if len(amounts)>=4:
+                task={'id':'t1','status':{'state':'TASK_STATE_COMPLETED'},'artifacts':[{'parts':[{'data':self.receipt(7000)}]}]}
+            else:task={'id':'t1','status':{'state':'TASK_STATE_INPUT_REQUIRED','message':{'parts':[{'text':'Grade A. Asking 12000'}]}}}
+            return httpx.Response(200,json={'result':task})
+        self.m.begin(self.o)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as c, patch('buyer_r3.time.sleep'):
+            out=Buyer(self.o,self.m,c,self.cat).run([self.shop])
+        self.assertEqual(len(amounts),4)
+        self.assertTrue(all(a<=9500 for a in amounts))
+        self.assertIsNotNone(out['receipt'])
 
     def test_quotes_actually_overlap_without_sharing_sqlite(self):
         import threading

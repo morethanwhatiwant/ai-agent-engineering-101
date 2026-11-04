@@ -61,7 +61,13 @@ def snapshot(state,catalog,opens_at,market):
             return None  # Do not substitute an old ranking for the scheduled snapshot.
         rows=[dict(r) for r in intel.db.execute('SELECT * FROM trades WHERE ts>?',(time.time()-21600,))]
         top=rank_products(catalog,rows,shops.get('shops',[]))
-        result=dict(opens_at=opens_at,selected_at=time.time(),ledger_through=through,
+        feedback=[]
+        buyer_db=Path(state)/'buyer.sqlite3'
+        if buyer_db.exists():
+            with sqlite3.connect('file:'+str(buyer_db.resolve())+'?mode=ro',uri=True) as db:
+                if db.execute("SELECT 1 FROM sqlite_master WHERE name='rival_feedback'").fetchone():
+                    feedback=[dict(order=r[0],sku=r[1],ledger=r[2],observed_at=r[3],stock=json.loads(r[4]),error=r[5]) for r in db.execute('SELECT * FROM rival_feedback ORDER BY observed_at DESC LIMIT 20')]
+        result=dict(buyer_feedback=feedback,opens_at=opens_at,selected_at=time.time(),ledger_through=through,
                     late=time.time()>opens_at-150,top10=top,
                     demand_basis='observed honest settlements with 6h warranty in last 6h; incomplete sample')
         path=Path(state)/'strategy.json';tmp=path.with_suffix('.tmp')

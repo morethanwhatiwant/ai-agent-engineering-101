@@ -20,6 +20,10 @@ class Memory:
         CREATE TABLE IF NOT EXISTS payments(order_id TEXT PRIMARY KEY, shop TEXT, sku TEXT,
           price INTEGER, paid INTEGER, ledger INTEGER, reason TEXT);
         CREATE TABLE IF NOT EXISTS outcomes(order_id TEXT PRIMARY KEY, details TEXT);
+        CREATE TABLE IF NOT EXISTS rival_visits(shop TEXT, sku TEXT, next_at REAL,
+          pending_order TEXT, reason TEXT, PRIMARY KEY(shop,sku));
+        CREATE TABLE IF NOT EXISTS rival_feedback(order_id TEXT PRIMARY KEY, sku TEXT, ledger INTEGER,
+          observed_at REAL, stock_json TEXT, error TEXT);
         CREATE TABLE IF NOT EXISTS credentials(shop TEXT PRIMARY KEY, member_key TEXT, updated REAL);
         ''')
 
@@ -55,6 +59,20 @@ class Memory:
                                 (row['order'],row.get('shop'),row.get('item'),row.get('price'),int(row['paid']),row.get('ledger'),row.get('reason')))
                 self.db.execute("UPDATE orders SET state=?,updated=? WHERE id=? AND state NOT IN ('paid','payment_failed')",
                                 ('paid' if row['paid'] else 'payment_failed',time.time(),row['order']))
+
+    def rival_ready(self, shop, sku, now=None):
+        now=time.time() if now is None else now
+        r=self.db.execute('SELECT * FROM rival_visits WHERE shop=? AND sku=?',(shop,sku)).fetchone()
+        if not r:return True
+        if r['pending_order']:
+            outcome=self.db.execute('SELECT state FROM orders WHERE id=?',(r['pending_order'],)).fetchone()
+            if not outcome or outcome[0] not in ('paid','payment_failed'):return False
+        return now>=r['next_at']
+
+    def defer_rival(self, shop, sku, reason, pending=None, seconds=60):
+        with self.db:
+            self.db.execute('INSERT OR REPLACE INTO rival_visits VALUES(?,?,?,?,?)',
+                            (shop,sku,time.time()+seconds,pending,reason))
 
     def reference(self, shop, sku):
         # Only recent paid prices, for this exact SKU at this shop.

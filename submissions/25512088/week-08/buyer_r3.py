@@ -92,6 +92,7 @@ def candidates(order, shops, catalog, memory, intel=None):
     ranked = []
     for shop in shops:
         options = [o for o in shop.get('offers',[]) if o.get('sku') in accepted and o.get('qty',0)>0
+                   and memory.rival_ready(shop['url'],o['sku'])
                    and o['sku'] in catalog and catalog[o['sku']].get('list_price',0)>0
                    and (order.get('kind')!='food' or catalog[o['sku']].get('shelf_hours',float('inf'))>=order.get('use_within_hours',0))]
         if not options:
@@ -200,6 +201,7 @@ class Buyer:
         return task
 
     def completed(self,s):
+        self.m.defer_rival(s['shop']['url'],s['sku'],'receipt_pending',pending=self.o['order'])
         failures=[]
         r=signed_receipt(s['last'],s['shop'],s['sku'],s['cap'],s['task'],failures)
         if not r:
@@ -264,27 +266,35 @@ class Buyer:
                 'candidate_shops':len(picks),'parallel_limit':3,'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],'ask':s['ask'],'cap':s['cap'],'deal_estimate':self.m.deal_estimate(s['shop']['url'])} for s in quotes]})
             if not quotes:
                 self.m.state(self.o['order'],'no_quote');return self.result()
-            for s in quotes:
+            for index,s in enumerate(quotes):
                 if time.time()>=self.deadline:break
-                for attempt in range(2):
+                # Reserve time for other competitors; no fixed negotiation turn count.
+                stop=min(self.deadline,time.time()+(self.deadline-time.time())/(len(quotes)-index))
+                while time.time()<stop:
                     amount=min(s['ask'],s['cap'])
                     self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'offer',amount)
                     self.m.state(self.o['order'],'offer_in_flight')
                     print('OFFER',s['shop']['name'],s['sku'],amount,flush=True)
                     try:task=self.send(s,str(amount))
                     except Exception:
+                        self.m.defer_rival(s['shop']['url'],s['sku'],'offer_unknown',pending=self.o['order'])
                         self.m.state(self.o['order'],'uncertain')
                         return self.result(s,reason='Offer outcome unknown; no second purchase attempted')
                     if task_state(task).endswith('COMPLETED'):
                         s['cap']=min(s['cap'],amount);return self.completed(s)
                     if not task_state(task).endswith('INPUT_REQUIRED'):break
                     ask=quote_fields(task)['price']
-                    if not ask or ask>s['cap']:break
+                    if not ask:break
                     s['ask']=int(ask)
+                    if ask>s['cap']:
+                        time.sleep(min(2,max(0,stop-time.time())))
+                self.m.defer_rival(s['shop']['url'],s['sku'],'retry_new_conversation')
                 self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'candidate_exhausted')
             self.m.state(self.o['order'],'no_deal');return self.result()
         finally:
             for s in self.sessions:
+                if self.m.rival_ready(s['shop']['url'],s['sku']):
+                    self.m.defer_rival(s['shop']['url'],s['sku'],'quote_visit')
                 if not s.get('task') or task_state(s.get('last',{})).endswith('COMPLETED'):continue
                 try:self.c.post(s['rpc'],headers={'A2A-Version':'1.0'},timeout=2,json={
                     'jsonrpc':'2.0','id':str(uuid.uuid4()),'method':'CancelTask','params':{'id':s['task']}})
@@ -304,6 +314,8 @@ def main():
     intel=Intel(args.state)
     try:
         memory.sync()
+        from rival_feedback import refresh_feedback
+        refresh_feedback(memory,args.market)
         if not memory.begin(order):
             out=dict(shop='',receipt=None,stars=3,review='Order already seen; reconcile payment before retrying')
         elif not order['acceptable']:

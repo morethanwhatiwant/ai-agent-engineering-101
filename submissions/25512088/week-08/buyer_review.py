@@ -22,6 +22,9 @@ if __name__=='__main__':
     ap=argparse.ArgumentParser(); ap.add_argument('--deal',required=True); ap.add_argument('--state',default='.market')
     args=ap.parse_args(); memory=Memory(args.state)
     try:
-        print(json.dumps(review(json.loads(Path(args.deal).read_text()),memory),ensure_ascii=False))
+        result=review(json.loads(Path(args.deal).read_text()),memory)
+        from rival_feedback import refresh_feedback
+        refresh_feedback(memory)
+        print(json.dumps(result,ensure_ascii=False))
     finally:
         memory.close()
