@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
@@ -49,9 +50,22 @@ class BuyerTests(unittest.TestCase):
         self.assertEqual(limit(self.o,self.cat['SKU1'],'C'),6000)
         self.assertEqual(limit(self.o,dict(list_price=2000),'A'),1900)
 
-    def test_only_three_shops_with_acceptable_stock(self):
+    def test_all_shops_with_acceptable_stock_are_visited(self):
         shops=[dict(self.shop,name=str(i)) for i in range(8)]+[dict(self.shop,name='bad',offers=[dict(sku='wrong',qty=1)])]
-        self.assertEqual(len(candidates(self.o,shops,self.cat,self.m)),3)
+        self.assertEqual(len(candidates(self.o,shops,self.cat,self.m)),8)
+
+    def test_run_contacts_all_eight_competitors_not_just_top_three(self):
+        shops=[dict(self.shop,name=str(i),url='https://shop'+str(i)+'.test') for i in range(8)]
+        visited=[]
+        def open_quote(shop,offer):
+            visited.append(shop['name'])
+            return dict(shop=shop,sku=offer['sku'],error='unavailable')
+        with httpx.Client() as client:
+            buyer=Buyer(self.o,self.m,client,self.cat)
+            with patch.object(buyer,'open_session',side_effect=open_quote):
+                result=buyer.run(shops)
+        self.assertEqual(set(visited),{str(i) for i in range(8)})
+        self.assertIsNone(result['receipt'])
 
     def test_own_shop_excluded_by_name_or_key_before_ranking(self):
         own = dict(self.shop, name='25512088', pubkey='own')

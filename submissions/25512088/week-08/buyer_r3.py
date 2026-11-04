@@ -112,7 +112,7 @@ def candidates(order, shops, catalog, memory, intel=None):
         best=min(alternatives,key=lambda r:r[:3])
         ranked.append((best[0],shop['name'],shop,best[3]))
     ranked.sort(key=lambda r:(r[0],r[1],r[3]['sku']))
-    return [(r[2],r[3]) for r in ranked[:3]]
+    return [(r[2],r[3]) for r in ranked]
 
 
 def surplus_score(value, price, reliability=1):
@@ -261,7 +261,7 @@ class Buyer:
                 else:self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unparsed_quote')
             quotes.sort(key=lambda s:quote_rank(s,self.catalog,self.intel))
             self.m.record(self.o['order'],'','',None,'selection_v3',details={
-                'parallel_quotes':len(picks),'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],'ask':s['ask'],'cap':s['cap'],'deal_estimate':self.m.deal_estimate(s['shop']['url'])} for s in quotes]})
+                'candidate_shops':len(picks),'parallel_limit':3,'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],'ask':s['ask'],'cap':s['cap'],'deal_estimate':self.m.deal_estimate(s['shop']['url'])} for s in quotes]})
             if not quotes:
                 self.m.state(self.o['order'],'no_quote');return self.result()
             for s in quotes:
