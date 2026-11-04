@@ -2,7 +2,7 @@
 import math
 import time
 
-SHOP_DISPLAY_NAME = '돈키호테'
+SHOP_DISPLAY_NAME = 'Don Quixote'
 SHOP_DESCRIPTION = (
     'Non-food specialist: furniture & premium bedding. Real stock; honest A/B/C grades; '
     'market certificate (cert=true); 6h warranty; signed receipts. '
