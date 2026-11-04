@@ -11,13 +11,16 @@ import os
 import time
 from pathlib import Path
 from urllib.request import urlopen
+from network_reads import retry_read
 from cryptography.hazmat.primitives import serialization
 from referral_program import Program
 
 
 def fetch(base, path):
-    with urlopen(base + path, timeout=10) as response:
-        return json.load(response)
+    def read():
+        with urlopen(base + path, timeout=20) as response:
+            return json.load(response)
+    return retry_read(read)
 
 
 def shop_urls(program, key_path):

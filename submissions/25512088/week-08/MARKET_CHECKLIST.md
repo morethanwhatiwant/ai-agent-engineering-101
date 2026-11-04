@@ -132,3 +132,8 @@
 ## 2026-11-04 가게 카드 및 HONEST 강화
 
 공개 ALL 상위10 카드 확인. dragonash/yms979/myeonggi/inextro 등의 real stock, honest grades, certificate, warranty, signed receipts, SKU→numeric offer 형식을 채택. 표시 이름 고가 비식품 전문점, 등록 식별자/영수증 shop 25512088은 호환성과 기존 거래를 위해 유지. 소개를 짧은 영어 프로토콜 안내로 교체, 실제 제공하는6h만 명시. 신규 영수증은 claim 검증 실패 시 발행/예약 전에 거절. 과거37거래 중 HONEST2/2는 소급 변경 불가. A/B 실제 claim과 미확인 등급 거절·예약 없음 등23개 테스트 통과. 테스트 로그 logs/honest-card-tests-20261104.log.
+
+
+## 2026-11-04 14:40 네트워크 복구
+
+발주 워커의 GET inventory DNS 오류가 처리되지 않아 프로세스 종료, 기존 planner는 외부 워커 모드로 buy=[]만 반환하여 발주 공백 발생. 조회 전용 재시도(2→4→최대60초), 인증 오류 즉시 중단, 추천 공개 조회20초 timeout/3회 재시도로 변경. seller lifespan에서 발주 worker 자동 시작, 파일 잠금으로 중복 차단, 기존 SQLite 누적비용 유지. POST 발주 응답 불명은 계속 중단하며 자동 재전송하지 않음. 27개 관련 테스트 통과. 부모·터널 유지한 셀러 자식 재시작 적용.

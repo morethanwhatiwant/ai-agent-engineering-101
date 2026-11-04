@@ -6,6 +6,8 @@ Member keys are bearer credentials: transferable, not account authentication.
 """
 import argparse
 import asyncio
+import subprocess
+import sys
 import base64
 from contextlib import asynccontextmanager
 import json
@@ -220,6 +222,13 @@ class Seller(AgentExecutor):
 def build(port, publish=True):
     @asynccontextmanager
     async def lifespan(app):
+        # The campaign lock prevents duplicate workers; spend stays in SQLite.
+        procurement_log = None
+        procurement = None
+        if settings().get('external_campaign'):
+            root = Path(__file__).resolve().parent
+            procurement_log = (root/'logs/procurement-worker-20261104.log').open('a')
+            procurement = subprocess.Popen([sys.executable, str(root/'procurement_campaign.py'), '--state', str(STATE.resolve())], cwd=root, stdin=subprocess.DEVNULL, stdout=procurement_log, stderr=subprocess.STDOUT, start_new_session=True)
         async def loop():
             while True:
                 try:
@@ -231,6 +240,9 @@ def build(port, publish=True):
         try:
             yield
         finally:
+            if procurement_log is not None:
+                procurement_log.close()
+            # Keep procurement alive across seller restarts; its durable lock is authoritative.
             worker.cancel()
             try:
                 await worker

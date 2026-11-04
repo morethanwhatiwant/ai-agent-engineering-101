@@ -1,6 +1,7 @@
 """Explicit one-off goods purchase authorization. Durable spend; never retry unknown POSTs."""
 import argparse,fcntl,importlib.util,json,math,os,sqlite3,time
 from pathlib import Path
+from network_reads import retry_read
 
 ROOT=Path(__file__).resolve().parent
 
@@ -30,7 +31,10 @@ def main():
     spec=importlib.util.spec_from_file_location('kit',ROOT.parents[2]/'scripts/market_kit.py');kit=importlib.util.module_from_spec(spec);spec.loader.exec_module(kit)
     assert (ROOT/'shop_key.pem').exists()
     key=kit.load_key(ROOT/'shop_key.pem');market=kit.Market('https://market.ourolabs.ai',os.environ.get('MARKET_OWNER'))
-    board=market.c.get(market.base+'/api/shops');board.raise_for_status()
+    def log(**data):print(json.dumps(dict(ts=time.time(),**data),ensure_ascii=False),flush=True)
+    def get_board():
+        response=market.c.get(market.base+'/api/shops');response.raise_for_status();return response
+    board=retry_read(get_board, attempts=None, report=log)
     me=next(s for s in board.json()['shops'] if s['name']=='25512088')
     market.join('shop','25512088',key,me['url'])
     catalog=json.loads((state/'catalog.json').read_text());blocked=set();window=None
@@ -40,7 +44,9 @@ def main():
         rows=db.execute('SELECT * FROM purchases WHERE campaign=?',(policy['campaign'],)).fetchall()
         spent=sum(r['cost'] or 0 for r in rows if r['status']=='paid');pending=sum(r['upper_cost'] for r in rows if r['status'] in ('sent','uncertain'))
         if pending:log(event='uncertain_stop',spent=spent,reserved=pending);break
-        response=market.call('GET','/api/inventory','shop');response.raise_for_status();inv=response.json()
+        def get_inventory():
+            response=market.call('GET','/api/inventory','shop');response.raise_for_status();return response.json()
+        inv=retry_read(get_inventory, attempts=None, report=log)
         if inv.get('round')!=3:log(event='wrong_round');break
         exposure=0
         with sqlite3.connect(state/'referrals.sqlite3') as referrals:
