@@ -161,6 +161,13 @@ class BuyerTests(unittest.TestCase):
         self.assertEqual(quote_fields(task)['grade'],'B')
         self.assertEqual(quote_fields(task)['warranty'],6)
 
+    def test_observed_lasts_more_hours_format(self):
+        from buyer_r3 import quote_fields
+        task={'status':{'message':{'parts':[{'text':'grade C, lasts 8 more hours, market certificate included. Asking 20500.'}]}}}
+        self.assertEqual(quote_fields(task)['hours'],8)
+        self.assertEqual(asking('grade B | 17.9 h shelf life left | ask 19000'),19000)
+        self.assertIsNone(asking('task 12345'))
+
     def test_rejected_candidate_falls_back_but_unknown_offer_stops(self):
         for uncertain in (False,True):
             order=dict(self.o,order='fallback'+str(uncertain))

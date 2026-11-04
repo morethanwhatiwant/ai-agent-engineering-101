@@ -31,7 +31,7 @@ def text_of(task):
 
 def asking(text):
     # Never interpret a SKU, quantity, expiry, or discount percent as a quote.
-    hits = re.findall(r'(?:asking price|asking|counteroffer|final price|offer price|price|견적|판매가|가격)\s*[:=]?\s*[₩$]?\s*([0-9][0-9,]*)\b',text,re.I)
+    hits = re.findall(r'\b(?:asking price|asking|ask|counteroffer|final price|offer price|price|견적|판매가|가격)\s*[:=]?\s*[₩$]?\s*([0-9][0-9,]*)\b',text,re.I)
     return int(hits[-1].replace(',','')) if hits else None
 
 
@@ -46,6 +46,9 @@ def quote_fields(task):
     for key,pattern in [('hours',r'(\d+(?:\.\d+)?)\s*h(?:ours?)?\s+(?:of )?shelf life left'),
                         ('warranty',r'warranty\s*[:=]?\s*(\d+(?:\.\d+)?)\s*h')]:
         m=re.search(pattern,text,re.I);result[key]=float(m.group(1)) if m else None
+    if result['hours'] is None:
+        m=re.search(r'\blasts\s+(\d+(?:\.\d+)?)\s+(?:more\s+)?hours?\b',text,re.I)
+        if m:result['hours']=float(m.group(1))
     parts=list(task.get('status',{}).get('message',{}).get('parts',[]))
     for artifact in task.get('artifacts',[]):parts+=artifact.get('parts',[])
     for part in parts:
