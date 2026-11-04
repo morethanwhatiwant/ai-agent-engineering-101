@@ -298,13 +298,17 @@ def main():
     ap.add_argument('--state',default='.market')
     ap.add_argument('--market',default='https://market.ourolabs.ai')
     args=ap.parse_args()
-    order=json.loads(Path(args.order).read_text())
+    from strategic_market import restrict_order
+    order=restrict_order(json.loads(Path(args.order).read_text()),args.state)
     memory=Memory(args.state)
     intel=Intel(args.state)
     try:
         memory.sync()
         if not memory.begin(order):
             out=dict(shop='',receipt=None,stars=3,review='Order already seen; reconcile payment before retrying')
+        elif not order['acceptable']:
+            memory.state(order['order'],'no_strategic_stock')
+            out=dict(shop='',receipt=None,stars=3,review='No owned strategic SKU matches this order; purchase skipped')
         else:
             with httpx.Client(follow_redirects=False) as client:
                 # Kit omits pubkeys from shops.json. Fetch trusted registration

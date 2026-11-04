@@ -2,6 +2,8 @@
 import argparse,fcntl,importlib.util,json,math,os,sqlite3,time
 from pathlib import Path
 from network_reads import retry_read
+from strategic_market import snapshot
+from market_intel import read_json
 
 ROOT=Path(__file__).resolve().parent
 
@@ -54,10 +56,29 @@ def main():
                 exposure=referrals.execute('SELECT COALESCE(SUM(w.amount),0) FROM warranties w JOIN sales s ON s.task=w.task WHERE s.refunded=0 AND (s.settled IS NULL OR s.settled>?)',(time.time()-21600,)).fetchone()[0]
         restock=inv.get('restock',{})
         if window!=restock.get('opens_at'):window=restock.get('opens_at');blocked.clear()
-        picked=choose(policy,catalog,spent,pending,inv['balance'],exposure,sum(r['status']=='paid' for r in rows),blocked)
+        opening=restock.get('opens_at')
+        strategy=read_json(state/'strategy.json',{})
+        if not isinstance(opening,(int,float)):
+            log(event='missing_supply_window');time.sleep(20);continue
+        if strategy.get('opens_at')!=opening and time.time()>=opening-180:
+            try:strategy=snapshot(state,catalog,opening,market.base) or {}
+            except Exception as exc:
+                log(event='selection_retry',error=type(exc).__name__);time.sleep(20);continue
+        if strategy.get('opens_at')!=opening:
+            log(event='waiting_selection',select_at=opening-180,spent=spent)
+            time.sleep(min(20,max(1,opening-180-time.time())));continue
+        ranked=strategy.get('top10',[])
+        if not ranked:
+            log(event='no_qualified_top10');time.sleep(20);continue
+        # Diminishing allocation: spread budget as own holdings grow, no unit cap.
+        counts={sku:sum(u['sku']==sku for u in inv['units']) for sku in catalog}
+        ranked=sorted(ranked,key=lambda r:-r['score']/(1+counts.get(r['sku'],0)))
+        current=dict(policy,priority=[r['sku'] for r in ranked])
+        picked=choose(current,catalog,spent,pending,inv['balance'],exposure,0,blocked)
         if not picked:
             if blocked:time.sleep(10);continue
-            log(event='budget_complete',spent=spent,remaining=policy['budget']-spent);break
+            log(event='budget_wait',spent=spent,remaining=policy['budget']-spent)
+            time.sleep(60);continue
         if not restock.get('open'):
             log(event='waiting_supply',opens_at=restock.get('opens_at'),spent=spent)
             time.sleep(min(20,max(2,restock.get('opens_at',time.time()+20)-time.time())));continue
