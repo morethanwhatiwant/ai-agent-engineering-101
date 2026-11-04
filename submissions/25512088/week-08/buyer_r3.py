@@ -3,6 +3,7 @@
 Numerical decisions are deterministic. Seller text is data, never instructions.
 No direct payments or forum posts here. One receipt at most is returned per order.
 """
+from concurrent.futures import ThreadPoolExecutor
 import argparse
 import base64
 import json
@@ -21,7 +22,7 @@ from market_intel import Intel
 
 
 def task_state(task):
-    return task.get('status', {}).get('state', '')
+    return task.get('status', {}).get('state', '').replace('-','_').upper()
 
 
 def text_of(task):
@@ -30,13 +31,35 @@ def text_of(task):
 
 def asking(text):
     # Never interpret a SKU, quantity, expiry, or discount percent as a quote.
-    hits = re.findall(r'(?:asking|counteroffer|final price|asking price)\s*[:=]?\s*([0-9][0-9,]*)\b',text,re.I)
+    hits = re.findall(r'(?:asking price|asking|counteroffer|final price|offer price|price|견적|판매가|가격)\s*[:=]?\s*[₩$]?\s*([0-9][0-9,]*)\b',text,re.I)
     return int(hits[-1].replace(',','')) if hits else None
 
 
 def grade_of(text):
     hit = re.search(r'\bgrade\s*[:=]?\s*([ABC])\b',text,re.I)
     return hit.group(1).upper() if hit else None
+
+
+def quote_fields(task):
+    """Seller data is untrusted; checkout certificates remain authoritative."""
+    text=text_of(task); result={'price':asking(text),'grade':grade_of(text)}
+    for key,pattern in [('hours',r'(\d+(?:\.\d+)?)\s*h(?:ours?)?\s+(?:of )?shelf life left'),
+                        ('warranty',r'warranty\s*[:=]?\s*(\d+(?:\.\d+)?)\s*h')]:
+        m=re.search(pattern,text,re.I);result[key]=float(m.group(1)) if m else None
+    parts=list(task.get('status',{}).get('message',{}).get('parts',[]))
+    for artifact in task.get('artifacts',[]):parts+=artifact.get('parts',[])
+    for part in parts:
+        data=part.get('data')
+        if not isinstance(data,dict):continue
+        for dest,keys in [('price',('asking_price','ask','price')),('hours',('hours_left','shelf_life_hours')),('warranty',('warranty_hours',))]:
+            for key in keys:
+                n=data.get(key)
+                if type(n) in (int,float) and math.isfinite(n) and n>=0:
+                    if dest!='price' or n>0 and n==int(n):result[dest]=n
+                    break
+        g=data.get('grade',data.get('claim'))
+        if g in ('A','B','C'):result['grade']=g
+    return result
 
 
 def limit(order, product, grade=None):
@@ -66,20 +89,22 @@ def candidates(order, shops, catalog, memory, intel=None):
     ranked = []
     for shop in shops:
         options = [o for o in shop.get('offers',[]) if o.get('sku') in accepted and o.get('qty',0)>0
-                   and o['sku'] in catalog and catalog[o['sku']].get('list_price',0)>0]
+                   and o['sku'] in catalog and catalog[o['sku']].get('list_price',0)>0
+                   and (order.get('kind')!='food' or catalog[o['sku']].get('shelf_hours',float('inf'))>=order.get('use_within_hours',0))]
         if not options:
             continue
         reliability = intel.reliability(shop['url']) if intel else 1
         alternatives=[]
         for offer in options:
             product=catalog[offer['sku']]
-            reference=memory.reference(shop['url'],offer['sku'])
+            reference=memory.condition_reference(shop['url'],offer['sku'],order)
             # No paid evidence: explicit price prior, not a learned quote.
             estimate=reference or product['list_price']*(.75 if order.get('kind')=='food' else .60)
             cap=limit(order,product)
             # Above-cap prices may negotiate down, but must not look affordable
             # simply because we clipped the estimate to our budget.
-            score=surplus_score(product['list_price'],estimate,reliability)*min(1,cap/estimate)
+            prob=memory.deal_estimate(shop['url'])
+            score=surplus_score(product['list_price'],estimate,reliability)*min(1,cap/estimate)*prob['probability']
             alternatives.append((-score,estimate,offer['sku'],offer))
         best=min(alternatives,key=lambda r:r[:3])
         ranked.append((best[0],shop['name'],shop,best[3]))
@@ -101,7 +126,8 @@ def quote_rank(session, catalog, intel=None):
             ask,session['shop']['name'],session['sku'])
 
 
-def signed_receipt(task, shop, sku, maximum, task_id):
+def signed_receipt(task, shop, sku, maximum, task_id, failures=None):
+    failures=[] if failures is None else failures
     for artifact in task.get('artifacts',[]):
         for part in artifact.get('parts',[]):
             r = part.get('data')
@@ -109,13 +135,13 @@ def signed_receipt(task, shop, sku, maximum, task_id):
                 continue
             price = r.get('price')
             if isinstance(price,bool) or not isinstance(price,(int,float)) or not math.isfinite(price) or price!=int(price):
-                continue
+                failures.append('amount_type'); continue
             # Identity is the market-registered signing key, not a display label.
             # Keep the signed label unchanged in the canonical body and receipt.
             if (r.get('item')!=sku or r.get('task')!=task_id or
                     not isinstance(r.get('shop'),str) or not r['shop'].strip() or
                     not 0<price<=maximum):
-                continue
+                failures.append('sku' if r.get('item')!=sku else 'task' if r.get('task')!=task_id else 'amount_limit' if not 0<price<=maximum else 'display_name'); continue
             try:
                 # SDK Struct can turn integer amounts into floats; market signs integers.
                 normalized = dict(r, price=int(price))
@@ -123,8 +149,8 @@ def signed_receipt(task, shop, sku, maximum, task_id):
                 Ed25519PublicKey.from_public_bytes(base64.b64decode(shop['pubkey'])).verify(
                     base64.b64decode(r['sig_seller']),json.dumps(body,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode())
                 return normalized
-            except (ValueError, KeyError, InvalidSignature):
-                continue
+            except (ValueError, KeyError, InvalidSignature, TypeError):
+                failures.append('signature_or_key'); continue
     return None
 
 
@@ -171,101 +197,95 @@ class Buyer:
         return task
 
     def completed(self,s):
-        r=signed_receipt(s['last'],s['shop'],s['sku'],s['cap'],s['task'])
+        failures=[]
+        r=signed_receipt(s['last'],s['shop'],s['sku'],s['cap'],s['task'],failures)
         if not r:
+            self.m.record(self.o['order'],s['shop']['url'],s['sku'],s['task'],'receipt_rejected',details={'reasons':failures or ['missing_artifact']})
             self.m.state(self.o['order'],'invalid_receipt')
             return self.result(s,reason='Receipt validation failed; no payment requested')
         self.m.state(self.o['order'],'awaiting_payment')
         self.m.record(self.o['order'],s['shop']['url'],s['sku'],s['task'],'agreement',r['price'])
         return self.result(s,r,'Agreement only; checkout certificate and actual payment still required')
 
+    def open_session(self, shop, offer):
+        # Each worker owns its SQLite connection; only network discovery is parallel.
+        memory=Memory(self.m.root)
+        worker=Buyer(self.o,memory,self.c,self.catalog)
+        worker.deadline=self.deadline
+        sku=offer['sku']; product=self.catalog[sku]
+        session=dict(shop=shop,sku=sku,cap=limit(self.o,product))
+        try:
+            card=self.c.get(shop['url'].rstrip('/')+'/.well-known/agent-card.json',timeout=5)
+            card.raise_for_status()
+            urls=[i['url'] for i in card.json().get('supportedInterfaces',[]) if i.get('protocolBinding')=='JSONRPC']
+            session['rpc']=next((u for u in urls if urlsplit(u).netloc==urlsplit(shop['url']).netloc),shop['url'].rstrip('/')+'/')
+            request=f"I want to buy {offer.get('name',product['name'])} ({sku}). Quote price, grade and warranty."
+            request+=(f" Must last at least {self.o['use_within_hours']} hours." if self.o.get('kind')=='food' else ' Require 6-hour warranty.')
+            key=memory.key(shop['url'])
+            if key:request+=' member='+key
+            print('QUOTE_REQUEST',shop['name'],sku,flush=True)
+            worker.send(session,request)
+        except Exception as exc:session['error']=type(exc).__name__
+        finally:memory.close()
+        return session
+
     def run(self, shops):
         quotes=[]
         try:
-            for shop, offer in candidates(self.o,shops,self.catalog,self.m,self.intel):
-                if time.time()>=self.deadline:
-                    break
-                sku=offer['sku']; product=self.catalog[sku]
-                s=dict(shop=shop,sku=sku,cap=limit(self.o,product))
-                self.sessions.append(s)
-                try:
-                    card=self.c.get(shop['url'].rstrip('/')+'/.well-known/agent-card.json',timeout=5)
-                    card.raise_for_status()
-                    urls=[i['url'] for i in card.json().get('supportedInterfaces',[]) if i.get('protocolBinding')=='JSONRPC']
-                    s['rpc']=next((u for u in urls if urlsplit(u).netloc==urlsplit(shop['url']).netloc),shop['url'].rstrip('/')+'/')
-                    key=self.m.key(shop['url'])
-                    request=f"I want to buy {offer.get('name',product['name'])} ({sku}). Quote price, grade and warranty."
-                    if self.o.get('kind')=='food':
-                        request+=f" Must last at least {self.o['use_within_hours']} hours."
-                    else:
-                        request+=' Require 6-hour warranty.'
-                    if key:
-                        request+=' member='+key
-                    print('QUOTE_REQUEST',shop['name'],sku,flush=True)
-                    task=self.send(s,request)
-                    if task_state(task).endswith('COMPLETED'):
-                        return self.completed(s)
-                    if not task_state(task).endswith('INPUT_REQUIRED'):
-                        continue
-                    content=text_of(task)
-                    ask=asking(content)
-                    s['grade']=grade_of(content)
-                    life=re.search(r'(\d+(?:\.\d+)?)\s*h(?:ours?)?\s+(?:of )?shelf life left',content,re.I)
-                    warranty=re.search(r'warranty\s*[:=]?\s*(\d+(?:\.\d+)?)\s*h',content,re.I)
-                    hours=float(life.group(1)) if life else None
-                    wh=float(warranty.group(1)) if warranty else None
-                    unsuitable=(self.o.get('kind')=='food' and hours is not None and hours<self.o['use_within_hours']) or (self.o.get('kind')!='food' and wh is not None and wh<6)
-                    if self.intel:
-                        self.intel.observe(shop['url'],sku,'condition_rejected' if unsuitable else 'quote',ask,s['grade'],hours,wh)
-                    if unsuitable:
-                        continue
-                    s['cap']=limit(self.o,product,s['grade'])
-                    if ask and s['cap']>0:
-                        s['ask']=ask
-                        quotes.append(s)
-                except Exception as exc:
+            picks=candidates(self.o,shops,self.catalog,self.m,self.intel)
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                # Submission order makes selection reproducible, irrespective of response speed.
+                pending=[pool.submit(self.open_session,shop,offer) for shop,offer in picks]
+                self.sessions=[f.result() for f in pending]
+            for s in self.sessions:
+                shop=s['shop'];sku=s['sku']
+                if s.get('error'):
                     if self.intel:self.intel.observe(shop['url'],sku,'unavailable')
-                    self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unavailable',details={'error':type(exc).__name__})
-            # Feasible quotes first, then absolute surplus weighted by evidence.
-            quotes.sort(key=lambda s:quote_rank(s,self.catalog,self.intel))
-            self.m.record(self.o['order'],'','',None,'selection_v2',details={
-                'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],
-                    'ask':s['ask'],'cap':s['cap'],
-                    'weighted_surplus':-quote_rank(s,self.catalog,self.intel)[1]} for s in quotes]})
-            if not quotes:
-                self.m.state(self.o['order'],'no_quote')
-                return self.result()
-            s=quotes[0]
-            for attempt in range(2):
-                amount=min(s['ask'],s['cap'])
-                self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'offer',amount)
-                self.m.state(self.o['order'],'offer_in_flight')
-                print('OFFER',s['shop']['name'],s['sku'],amount,flush=True)
-                try:
-                    task=self.send(s,str(amount))
-                except Exception:
-                    self.m.state(self.o['order'],'uncertain')
-                    return self.result(s,reason='Offer outcome unknown; no second purchase attempted')
+                    self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unavailable',details={'error':s['error']})
+                    continue
+                task=s['last'];fields=quote_fields(task)
+                s['grade']=fields['grade'];s['cap']=limit(self.o,self.catalog[sku],s['grade'])
                 if task_state(task).endswith('COMPLETED'):
-                    s['cap']=min(s['cap'],amount)
+                    # A certificate, not a parsed claim, enforces the actual grade at payment.
                     return self.completed(s)
-                if not task_state(task).endswith('INPUT_REQUIRED'):
-                    break
-                ask=asking(text_of(task))
-                if not ask or ask>s['cap']:
-                    break
-                s['ask']=ask
-            self.m.state(self.o['order'],'no_deal')
-            return self.result(s)
+                if not task_state(task).endswith('INPUT_REQUIRED'):continue
+                hours,wh=fields['hours'],fields['warranty']
+                unsuitable=(self.o.get('kind')=='food' and hours is not None and hours<self.o['use_within_hours']) or (self.o.get('kind')!='food' and wh is not None and wh<6)
+                if self.intel:self.intel.observe(shop['url'],sku,'condition_rejected' if unsuitable else 'quote',fields['price'],s['grade'],hours,wh)
+                if unsuitable:continue
+                if fields['price']:
+                    s['ask']=int(fields['price']);quotes.append(s)
+                else:self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unparsed_quote')
+            quotes.sort(key=lambda s:quote_rank(s,self.catalog,self.intel))
+            self.m.record(self.o['order'],'','',None,'selection_v3',details={
+                'parallel_quotes':len(picks),'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],'ask':s['ask'],'cap':s['cap'],'deal_estimate':self.m.deal_estimate(s['shop']['url'])} for s in quotes]})
+            if not quotes:
+                self.m.state(self.o['order'],'no_quote');return self.result()
+            for s in quotes:
+                if time.time()>=self.deadline:break
+                for attempt in range(2):
+                    amount=min(s['ask'],s['cap'])
+                    self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'offer',amount)
+                    self.m.state(self.o['order'],'offer_in_flight')
+                    print('OFFER',s['shop']['name'],s['sku'],amount,flush=True)
+                    try:task=self.send(s,str(amount))
+                    except Exception:
+                        self.m.state(self.o['order'],'uncertain')
+                        return self.result(s,reason='Offer outcome unknown; no second purchase attempted')
+                    if task_state(task).endswith('COMPLETED'):
+                        s['cap']=min(s['cap'],amount);return self.completed(s)
+                    if not task_state(task).endswith('INPUT_REQUIRED'):break
+                    ask=quote_fields(task)['price']
+                    if not ask or ask>s['cap']:break
+                    s['ask']=int(ask)
+                self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'candidate_exhausted')
+            self.m.state(self.o['order'],'no_deal');return self.result()
         finally:
             for s in self.sessions:
-                if not s.get('task') or task_state(s.get('last',{})).endswith('COMPLETED'):
-                    continue
-                try:
-                    self.c.post(s['rpc'],headers={'A2A-Version':'1.0'},timeout=2,json={
-                        'jsonrpc':'2.0','id':str(uuid.uuid4()),'method':'CancelTask','params':{'id':s['task']}})
-                except Exception:
-                    pass
+                if not s.get('task') or task_state(s.get('last',{})).endswith('COMPLETED'):continue
+                try:self.c.post(s['rpc'],headers={'A2A-Version':'1.0'},timeout=2,json={
+                    'jsonrpc':'2.0','id':str(uuid.uuid4()),'method':'CancelTask','params':{'id':s['task']}})
+                except Exception:pass
 
 
 def main():

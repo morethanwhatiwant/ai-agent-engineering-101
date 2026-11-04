@@ -63,6 +63,34 @@ class Memory:
           (shop,sku,time.time()-86400)).fetchone()
         return row[0] if row else None
 
+    def condition_reference(self, shop, sku, order, grade=None):
+        from statistics import median
+        rows=self.db.execute("""SELECT p.price,o.updated,x.details FROM payments p
+          JOIN orders o ON o.id=p.order_id JOIN outcomes x ON x.order_id=p.order_id
+          WHERE p.paid=1 AND p.shop=? AND p.sku=? AND o.updated>?
+          ORDER BY o.updated DESC LIMIT 30""",(shop,sku,time.time()-21600)).fetchall()
+        prices=[]
+        for row in rows:
+            info=json.loads(row['details'])
+            if grade and info.get('grade')!=grade:continue
+            if order.get('kind')=='food':
+                expiry=info.get('expires_at')
+                if not isinstance(expiry,(int,float)) or (expiry-row['updated'])/3600<order.get('use_within_hours',0):continue
+            elif (info.get('warranty_hours') or 0)<6:continue
+            prices.append(row['price'])
+        return int(median(prices)) if prices else None
+
+    def deal_estimate(self, shop):
+        # Beta(2,2) smoothing; only offers whose order has resolved count.
+        # Unselected quote-only shops and uncertain payments are not failures.
+        rows=self.db.execute("""SELECT DISTINCT e.order_id,p.paid,p.shop,o.state
+          FROM events e JOIN orders o ON o.id=e.order_id
+          LEFT JOIN payments p ON p.order_id=e.order_id
+          WHERE e.shop=? AND e.kind='offer' AND e.ts>? AND
+          o.state IN ('paid','payment_failed','no_deal')""",(shop,time.time()-21600)).fetchall()
+        won=sum(r['paid']==1 and r['shop']==shop for r in rows)
+        return {'probability':(won+2)/(len(rows)+4),'trials':len(rows),'wins':won}
+
     def remember_key(self, shop, key):
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO credentials VALUES(?,?,?)', (shop,key,time.time()))

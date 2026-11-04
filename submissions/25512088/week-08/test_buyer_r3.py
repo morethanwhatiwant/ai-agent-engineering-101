@@ -154,6 +154,52 @@ class BuyerTests(unittest.TestCase):
         self.assertEqual(out['stars'],1)
         self.assertEqual(self.m.db.execute('SELECT COUNT(*) FROM outcomes').fetchone()[0],1)
 
+    def test_structured_quote_and_immediate_grade(self):
+        from buyer_r3 import quote_fields
+        task={'status':{'message':{'parts':[{'data':{'price':7000,'grade':'B','warranty_hours':6}}]}}}
+        self.assertEqual(quote_fields(task)['price'],7000)
+        self.assertEqual(quote_fields(task)['grade'],'B')
+        self.assertEqual(quote_fields(task)['warranty'],6)
+
+    def test_rejected_candidate_falls_back_but_unknown_offer_stops(self):
+        for uncertain in (False,True):
+            order=dict(self.o,order='fallback'+str(uncertain))
+            self.m.begin(order);offers=[]
+            other=dict(self.shop,name='other',url='https://other.test')
+            def handler(req):
+                if req.method=='GET':return httpx.Response(200,json={'supportedInterfaces':[]})
+                b=json.loads(req.content)
+                if b['method']=='CancelTask':return httpx.Response(200,json={'result':{}})
+                text=b['params']['message']['parts'][0]['text']
+                if text.isdigit():
+                    offers.append(req.url.host)
+                    if req.url.host=='shop.test':
+                        if uncertain:raise httpx.ReadTimeout('lost',request=req)
+                        task={'id':'t1','status':{'state':'TASK_STATE_REJECTED'}}
+                    else:task={'id':'t1','status':{'state':'TASK_STATE_COMPLETED'},'artifacts':[{'parts':[{'data':self.receipt(7000)}]}]}
+                else:task={'id':'t1','status':{'state':'TASK_STATE_INPUT_REQUIRED','message':{'parts':[{'text':'Grade A. Asking '+('6000' if req.url.host=='shop.test' else '7000')}]}}}
+                return httpx.Response(200,json={'result':task})
+            with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+                out=Buyer(order,self.m,c,self.cat).run([self.shop,other])
+            self.assertEqual(offers,['shop.test'] if uncertain else ['shop.test','other.test'])
+            self.assertEqual(out['receipt'] is None,uncertain)
+
+    def test_quotes_actually_overlap_without_sharing_sqlite(self):
+        import threading
+        barrier=threading.Barrier(2)
+        def handler(req):
+            if req.method=='GET':
+                barrier.wait(timeout=3)
+                return httpx.Response(200,json={'supportedInterfaces':[]})
+            b=json.loads(req.content)
+            if b['method']=='CancelTask':return httpx.Response(200,json={'result':{}})
+            return httpx.Response(200,json={'result':{'id':'t1','status':{'state':'TASK_STATE_REJECTED'}}})
+        self.m.begin(self.o)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as c:
+            out=Buyer(self.o,self.m,c,self.cat).run([self.shop,dict(self.shop,name='second',url='https://second.test')])
+        self.assertIsNone(out['receipt'])
+        self.assertEqual(self.m.db.execute("select count(*) from events where kind='unavailable'").fetchone()[0],0)
+
 
 if __name__=='__main__':
     unittest.main()
