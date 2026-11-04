@@ -30,6 +30,7 @@ class SellerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             (state/'inventory.json').write_text(json.dumps({'round':3, 'units': [dict(
                 unit='u1', sku='G00001', name='김치', category='김치', cost=8000,
                 list_price=10000, grade='A', expires_at=time.time()+86400, supplied_at=time.time())]}))
+            (state/'catalog.json').write_text(json.dumps({'G00001':{'kind':'food','shelf_hours':28}}))
             program = Program(state)
             program.put('cursor', 100)
             program.close()
@@ -53,6 +54,7 @@ class SellerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIn('COMPLETED', result['status']['state'])
                     artifacts = json.dumps(result['artifacts'])
                     self.assertIn('sig_seller', artifacts)
+                    self.assertIn('"claim": "A"',artifacts)
                     self.assertNotIn('member', artifacts)
                     self.assertIn('Private provisional member key', json.dumps(result))
                     self.assertIn('Public referral code: REF-',json.dumps(result))

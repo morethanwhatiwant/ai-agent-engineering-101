@@ -11,6 +11,28 @@ RATES = {'goods': {'A': 95, 'B': 80, 'C': 60},
          'food': {'A': 95, 'B': 75, 'C': 45}}
 
 
+def receipt_grade(unit, catalog=None, now=None):
+    """Grade at issuance; omit uncertain food claims near a transition."""
+    now=time.time() if now is None else now
+    product=(catalog or {}).get(unit['sku'],{})
+    kind=unit.get('kind') or product.get('kind') or ('food' if unit.get('expires_at') else 'goods')
+    grade=unit.get('grade')
+    if grade not in ('A','B','C'):return None
+    if kind=='goods':return grade
+    if kind!='food':return None
+    expiry=unit.get('expires_at');shelf=product.get('shelf_hours')
+    if (not isinstance(expiry,(int,float)) or not math.isfinite(expiry) or
+        not isinstance(shelf,(int,float)) or not math.isfinite(shelf) or shelf<=0 or expiry<=now+120):
+        return None
+    def at(ts):
+        fraction=(expiry-ts)/(3600*shelf)
+        return 'A' if fraction>=.8 else 'B' if fraction>=.45 else 'C'
+    current=at(now)
+    # A fresher catalog computation conflicting with the snapshot is uncertain.
+    if current<grade or at(now+120)!=current:return None
+    return current
+
+
 def public_price(unit, catalog=None, now=None):
     now = time.time() if now is None else now
     product = (catalog or {}).get(unit['sku'], {})

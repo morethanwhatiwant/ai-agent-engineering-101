@@ -25,7 +25,7 @@ from a2a.types import AgentCapabilities, AgentCard, AgentInterface, AgentSkill
 from cryptography.hazmat.primitives import serialization
 from referral_program import Program, policy
 from referral_campaign import tick
-from stock_pricing import public_price
+from stock_pricing import public_price, receipt_grade
 from seller_strategy import sale_quote
 from market_intel import Intel
 from shop_copy import SHOP_DESCRIPTION
@@ -166,8 +166,11 @@ class Seller(AgentExecutor):
                         self.open.pop(task.id, None)
                         await up.reject(say('Stock or benefit already reserved. Please request a new quote.'))
                         return
-                    receipt = sign(dict(shop=program.p['shop_name'], item=unit['sku'], price=q['price'],
-                                        task=task.id, unit=unit['unit'], cert=True))
+                    terms=dict(shop=program.p['shop_name'], item=unit['sku'], price=q['price'],
+                               task=task.id, unit=unit['unit'], cert=True)
+                    claim=receipt_grade(unit,catalog)
+                    if claim is not None:terms['claim']=claim
+                    receipt = sign(terms)
                     await up.add_artifact(parts=[new_data_part(receipt)], name='receipt')
                     private = (f' Private provisional member key: {secret}. Save privately; never post it. '
                                'After payment use SHARE member=<key> for current product referral offers.') if secret else ''

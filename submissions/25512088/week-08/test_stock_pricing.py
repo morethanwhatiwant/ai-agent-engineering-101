@@ -1,5 +1,5 @@
 import unittest
-from stock_pricing import public_price
+from stock_pricing import public_price, receipt_grade
 
 
 class StockPricingTests(unittest.TestCase):
@@ -30,6 +30,16 @@ class StockPricingTests(unittest.TestCase):
                   dict(self.unit('A','food'),expires_at=None)]:
             with self.assertRaises(ValueError):
                 public_price(u, now=1000)
+
+    def test_receipt_claim_uses_current_grade_and_omits_uncertainty(self):
+        cat={'x':{'shelf_hours':100}}
+        self.assertEqual(receipt_grade(self.unit('B'),now=1000),'B')
+        self.assertEqual(receipt_grade(self.unit('A','food',60),cat,now=1000),'B')
+        self.assertEqual(receipt_grade(self.unit('B','food',30),cat,now=1000),'C')
+        self.assertIsNone(receipt_grade(self.unit('A','food',80.01),cat,now=1000))
+        self.assertIsNone(receipt_grade(self.unit('C','food',90),cat,now=1000))
+        self.assertIsNone(receipt_grade(self.unit('A','food',60),{},now=1000))
+        self.assertIsNone(receipt_grade(self.unit('C','food',0),cat,now=1000))
 
 
 if __name__ == '__main__':
