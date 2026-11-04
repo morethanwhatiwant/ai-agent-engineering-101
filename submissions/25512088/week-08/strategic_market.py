@@ -11,7 +11,8 @@ from statistics import median
 from market_intel import Intel, read_json
 
 
-def rank_products(catalog, trades, shops, own_name='25512088'):
+def rank_products(catalog, trades, shops, own_name='25512088', local_demand=None):
+    local_demand=local_demand or {}
     prices = {}; supply = {}; vendors = {}
     for row in trades:
         if row['warranty'] != 6 or not row['honest']:
@@ -34,8 +35,18 @@ def rank_products(catalog, trades, shops, own_name='25512088'):
         product=catalog[sku];price=median(values)
         if len(values)<3 or price<threshold:continue
         qty=supply.get(sku,0);count=len(vendors.get(sku,set()))
-        score=len(values)*price/((1+qty)*(1+count)**.5)
-        rows.append(dict(sku=sku,name=product['name'],sales=len(values),median_6h=price,
+        scenarios=[];expected=0
+        for grade,prob,rate in [('A',.7,.65),('B',.2,.50),('C',.1,.35)]:
+            observations=[r['price'] for r in trades if r['sku']==sku and r.get('grade')==grade and r['warranty']==6 and r['honest']]
+            typical=median(observations) if observations else None
+            cost=product['list_price']*rate
+            # Unknown grade-price evidence contributes a conservative unsold cost.
+            net=typical*.85*.95-cost*1.09-2000 if typical else -cost
+            expected+=prob*net
+            scenarios.append(dict(grade=grade,samples=len(observations),median_6h=typical,mean_cost=cost,net_estimate=net))
+        requests=local_demand.get(sku,0)
+        score=(len(values)+min(requests,len(values))*.25)*price/((1+qty)*(1+count)**.5)
+        rows.append(dict(expected_net=expected,grade_scenarios=scenarios,local_requests=requests,sku=sku,name=product['name'],sales=len(values),median_6h=price,
                          competitor_units=qty,competitor_shops=count,score=score,
                          upper_cost=math.ceil(product['list_price']*.75)))
     return sorted(rows,key=lambda r:(-r['score'],r['sku']))[:10]
@@ -60,14 +71,20 @@ def snapshot(state,catalog,opens_at,market):
         if not shops or time.time()-through>900:
             return None  # Do not substitute an old ranking for the scheduled snapshot.
         rows=[dict(r) for r in intel.db.execute('SELECT * FROM trades WHERE ts>?',(time.time()-21600,))]
-        top=rank_products(catalog,rows,shops.get('shops',[]))
+        demand={}
+        buyer_path=Path(state)/'buyer.sqlite3'
+        if buyer_path.exists():
+            with sqlite3.connect('file:'+str(buyer_path.resolve())+'?mode=ro',uri=True) as db:
+                for (context,) in db.execute('SELECT context FROM orders WHERE updated>?',(time.time()-21600,)):
+                    for sku in set(json.loads(context).get('acceptable') or []):demand[sku]=demand.get(sku,0)+1
+        top=rank_products(catalog,rows,shops.get('shops',[]),local_demand=demand)
         feedback=[]
         buyer_db=Path(state)/'buyer.sqlite3'
         if buyer_db.exists():
             with sqlite3.connect('file:'+str(buyer_db.resolve())+'?mode=ro',uri=True) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='rival_feedback'").fetchone():
                     feedback=[dict(order=r[0],sku=r[1],ledger=r[2],observed_at=r[3],stock=json.loads(r[4]),error=r[5]) for r in db.execute('SELECT * FROM rival_feedback ORDER BY observed_at DESC LIMIT 20')]
-        result=dict(buyer_feedback=feedback,opens_at=opens_at,selected_at=time.time(),ledger_through=through,
+        result=dict(version=2,buyer_feedback=feedback,opens_at=opens_at,selected_at=time.time(),ledger_through=through,
                     late=time.time()>opens_at-150,top10=top,
                     demand_basis='observed honest settlements with 6h warranty in last 6h; incomplete sample')
         path=Path(state)/'strategy.json';tmp=path.with_suffix('.tmp')

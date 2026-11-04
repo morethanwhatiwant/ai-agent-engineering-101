@@ -309,14 +309,15 @@ def main():
     ap.add_argument('--market',default='https://market.ourolabs.ai')
     args=ap.parse_args()
     from strategic_market import restrict_order
-    order=restrict_order(json.loads(Path(args.order).read_text()),args.state)
+    original_order=json.loads(Path(args.order).read_text())
+    order=restrict_order(original_order,args.state)
     memory=Memory(args.state)
     intel=Intel(args.state)
     try:
         memory.sync()
         from rival_feedback import refresh_feedback
         refresh_feedback(memory,args.market)
-        if not memory.begin(order):
+        if not memory.begin(original_order):
             out=dict(shop='',receipt=None,stars=3,review='Order already seen; reconcile payment before retrying')
         elif not order['acceptable']:
             memory.state(order['order'],'no_strategic_stock')

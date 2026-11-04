@@ -4,5 +4,11 @@
   "cash_floor": 500000,
   "goods_only": true,
   "external_campaign": true,
-  "priority": ["Gd1e861c7", "G1a265ca2", "G6b0fd5bc", "Gea0cca52"]
+  "priority": [
+    "Gd1e861c7",
+    "G1a265ca2",
+    "G6b0fd5bc",
+    "Gea0cca52"
+  ],
+  "budget_basis": "unsold_inventory_cost"
 }

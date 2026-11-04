@@ -15,4 +15,10 @@ class PurchaseTests(unittest.TestCase):
   self.assertEqual(choose(self.p,self.cat,0,0,4782055,0,1)[0],'c')
  def test_refund_exposure_preserved(self):
   self.assertIsNone(choose(self.p,self.cat,0,0,1000000,250000,0))
+ def test_sale_releases_inventory_budget_without_resetting_lifetime_spend(self):
+  # Current inventory falls after settlement even if historical spend exceeds budget.
+  self.assertIsNone(choose(self.p,self.cat,2400000,0,5000000,0,0))
+  self.assertEqual(choose(self.p,self.cat,1900000,0,5000000,0,0),('a',300000))
+ def test_reward_and_warranty_liabilities_limit_cash(self):
+  self.assertIsNone(choose(self.p,self.cat,0,0,1000000,300000,0))
 if __name__=='__main__':unittest.main()

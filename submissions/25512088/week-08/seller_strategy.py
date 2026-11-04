@@ -59,6 +59,21 @@ def sale_quote(unit, catalog, program, intel=None, token='', ref=''):
     comp=intel.comparable(unit['sku'],unit['grade'],hours,warranty_hours(unit)) if intel else {'count':0,'median':None}
     if comp['median']:
         base=math.ceil(comp['median']*.99)
+    adjustment=1.0
+    if intel and comp['median']:
+        shops=intel.source('shops',None,max_age=180)
+        if shops:
+            competitors=sum(max(0,s.get('stock',{}).get(unit['sku'],0)) for s in shops.get('shops',[]) if s.get('name')!=program.p['shop_name'])
+            sold=program.db.execute('SELECT COUNT(*) FROM sales WHERE sku=? AND settled>? AND refunded=0',(unit['sku'],time.time()-21600)).fetchone()[0]
+            quotes=0
+            for row in intel.db.execute("SELECT body FROM decisions WHERE role='seller_quote' AND ts>?",(time.time()-21600,)):
+                if json.loads(row[0]).get('sku')==unit['sku']:quotes+=1
+            # Only a small increase with observed demand and sell-through; stock scarcity alone is insufficient.
+            if quotes>=5 and sold>=2 and sold/quotes>=.2 and competitors<=1:
+                adjustment=1.02
+            elif quotes>=5 and sold==0 and competitors>0:
+                adjustment=.98
+            base=math.ceil(base*adjustment)
     floor=protected_floor(unit,program.p)
     q=program.quote(max(base,floor),unit['cost'],token=token,ref=ref)
     q['warranty_hours']=warranty_hours(unit)
@@ -66,7 +81,7 @@ def sale_quote(unit, catalog, program, intel=None, token='', ref=''):
         raise ValueError('Net margin guard rejected quote')
     if intel:
         intel.decision('seller_quote',{'sku':unit['sku'],'cost':unit['cost'],'price':q['price'],
-                       'reward':q['reward'],'floor':floor,'comparable':comp,
+                       'reward':q['reward'],'floor':floor,'comparable':comp,'market_adjustment':adjustment,
                        'source':'settlement_median' if comp['median'] else 'grade_formula_cost_protected'})
     return q
 
