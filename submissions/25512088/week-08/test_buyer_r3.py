@@ -89,6 +89,20 @@ class BuyerTests(unittest.TestCase):
         self.assertIsNone(result['receipt'])
         self.assertEqual(len(sent),1)
 
+    def test_display_alias_requires_registered_key_and_unchanged_signature(self):
+        receipt=dict(shop='Friendly Display Shop',item='SKU1',price=7000,task='t1')
+        raw=json.dumps(receipt,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()
+        receipt['sig_seller']=base64.b64encode(self.key.sign(raw)).decode()
+        task={'artifacts':[{'parts':[{'data':receipt}]}]}
+        self.assertEqual(signed_receipt(task,self.shop,'SKU1',7000,'t1')['shop'],'Friendly Display Shop')
+        other=Ed25519PrivateKey.generate()
+        wrong=dict(self.shop,pubkey=base64.b64encode(other.public_key().public_bytes(
+            serialization.Encoding.Raw,serialization.PublicFormat.Raw)).decode())
+        self.assertIsNone(signed_receipt(task,wrong,'SKU1',7000,'t1'))
+        self.assertIsNone(signed_receipt(task,self.shop,'SKU1',7000,'different-task'))
+        receipt['shop']='shop'
+        self.assertIsNone(signed_receipt(task,self.shop,'SKU1',7000,'t1'))
+
     def test_actual_rpc_flow_returns_one_receipt_and_checkout_policy(self):
         requests=[]
         def handler(req):

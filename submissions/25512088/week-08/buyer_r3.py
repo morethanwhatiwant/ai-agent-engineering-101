@@ -88,7 +88,11 @@ def signed_receipt(task, shop, sku, maximum, task_id):
             price = r.get('price')
             if isinstance(price,bool) or not isinstance(price,(int,float)) or not math.isfinite(price) or price!=int(price):
                 continue
-            if r.get('item')!=sku or r.get('task')!=task_id or r.get('shop')!=shop['name'] or not 0<price<=maximum:
+            # Identity is the market-registered signing key, not a display label.
+            # Keep the signed label unchanged in the canonical body and receipt.
+            if (r.get('item')!=sku or r.get('task')!=task_id or
+                    not isinstance(r.get('shop'),str) or not r['shop'].strip() or
+                    not 0<price<=maximum):
                 continue
             try:
                 # SDK Struct can turn integer amounts into floats; market signs integers.
