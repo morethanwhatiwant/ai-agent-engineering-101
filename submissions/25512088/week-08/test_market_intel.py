@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 import httpx
 from market_intel import Intel
-from seller_strategy import sale_quote,restock_plan,cost_floor
+from seller_strategy import sale_quote,restock_plan,cost_floor,protected_floor
 from referral_program import Program
 from buyer_publicist import queue_update
 from buyer_r3 import Buyer
@@ -42,7 +42,7 @@ class IntelligenceTests(unittest.TestCase):
         self.i.ingest(self.rows(price=5000))
         q=sale_quote(self.u,{},self.p,self.i)
         self.assertGreaterEqual(q['price'],8720)
-        self.assertEqual(q['base'],cost_floor(8000,self.p.p))
+        self.assertEqual(q['base'],protected_floor(self.u,self.p.p))
     def test_benefit_variants_preserve_net_margin(self):
         # Force founder and referral branches through actual membership records.
         seed=self.p.quote(12000,8000)
@@ -89,7 +89,7 @@ class IntelligenceTests(unittest.TestCase):
         (self.root/'inventory.json').write_text(json.dumps({'units':[self.u]}))
         self.assertTrue(queue_update(self.i));self.assertFalse(queue_update(self.i))
         msg=json.loads((self.root/'buyer-forum/outbox.jsonl').read_text())
-        self.assertEqual(msg['as'],'buyer');self.assertIn('같은 운영자',msg['post']);self.assertIn('9,500',msg['post'])
+        self.assertEqual(msg['as'],'buyer');self.assertIn('같은 운영자',msg['post']);self.assertIn('보증 6h',msg['post'])
         self.assertFalse((self.root/'outbox.jsonl').exists())
 
 if __name__=='__main__':unittest.main()

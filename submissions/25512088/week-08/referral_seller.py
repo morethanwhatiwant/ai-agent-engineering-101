@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives import serialization
 from referral_program import Program, policy
 from referral_campaign import tick
 from stock_pricing import public_price, receipt_grade
-from seller_strategy import sale_quote
+from seller_strategy import sale_quote, negotiate
 from market_intel import Intel
 from shop_copy import SHOP_DESCRIPTION
 from growth_offers import offers
@@ -129,7 +129,8 @@ class Seller(AgentExecutor):
                 unit = select_unit(text, inv['units'], reserved)
                 if not unit:
                     intel.decision('seller_no_stock',dict(task=task.id,**stock_miss(text,inv['units'],reserved,catalog)))
-                    await up.reject(say('No matching stock available.'))
+                    available=offers(STATE,program,intel,limit=2)
+                    await up.reject(say('No matching stock available. Alternatives: '+json.dumps(available,ensure_ascii=False)))
                     return
                 try:
                     q = sale_quote(unit, catalog, program, intel, token=cred['member'], ref=cred['ref'])
@@ -158,16 +159,19 @@ class Seller(AgentExecutor):
                 if latest['price'] < deal['quote']['price']:
                     deal['quote'] = latest
                 match = re.fullmatch(r'\s*(?:offer\s*[=:]?\s*)?(\d+)\s*', text, flags=re.I)
+                if match and int(match.group(1)) < deal['quote']['price']:
+                    deal['quote']=negotiate(unit,deal['quote'],int(match.group(1)),catalog,program,
+                        token=deal['credentials']['member'],ref=deal['credentials']['ref'])
                 if match and int(match.group(1)) >= deal['quote']['price']:
                     q = deal['quote']
                     try:
-                        secret = program.accept(task.id, unit['unit'], unit['sku'], unit['cost'], q)
+                        secret = program.accept(task.id, unit['unit'], unit['sku'], unit['cost'], q, inventory=inv)
                     except (ValueError, sqlite3.IntegrityError):
                         self.open.pop(task.id, None)
                         await up.reject(say('Stock or benefit already reserved. Please request a new quote.'))
                         return
                     terms=dict(shop=program.p['shop_name'], item=unit['sku'], price=q['price'],
-                               task=task.id, unit=unit['unit'], cert=True)
+                               task=task.id, unit=unit['unit'], cert=True,warranty_hours=q.get('warranty_hours',0))
                     claim=receipt_grade(unit,catalog)
                     if claim is not None:terms['claim']=claim
                     receipt = sign(terms)
@@ -185,16 +189,26 @@ class Seller(AgentExecutor):
             q = deal['quote']
             expiry=deal['unit'].get('expires_at')
             conditions=(f"{max(0,int((expiry-time.time())/3600))} h of shelf life left; "
-                        if expiry else 'warranty 0 h; ')
+                        if expiry else f"warranty {q.get('warranty_hours',0)} h; ")
             await up.requires_input(say(f"{deal['unit']['name']} ({deal['unit']['sku']}): grade {deal['unit']['grade']}; public price {q['base']}; benefit {q['benefit']}. "
                                        f"{conditions}Send a number to accept. Asking {q['price']}"))
         finally:
+            with program.db:
+                program.db.execute('CREATE TABLE IF NOT EXISTS quote_holds(task TEXT PRIMARY KEY, unit TEXT, until REAL)')
+                program.db.execute('DELETE FROM quote_holds WHERE until<=?',(time.time(),))
+                for tid,hold in self.open.items():
+                    program.db.execute('INSERT OR REPLACE INTO quote_holds VALUES(?,?,?)',(tid,hold['unit']['unit'],hold['until']))
             program.close()
             intel.close()
 
     async def cancel(self, context, event_queue):
         task = context.current_task
         self.open.pop(task.id, None)
+        program=Program(STATE)
+        try:
+            if program.db.execute("SELECT 1 FROM sqlite_master WHERE name='quote_holds'").fetchone():
+                with program.db:program.db.execute('DELETE FROM quote_holds WHERE task=?',(task.id,))
+        finally:program.close()
         await TaskUpdater(event_queue=event_queue, task_id=task.id, context_id=task.context_id).cancel()
 
 

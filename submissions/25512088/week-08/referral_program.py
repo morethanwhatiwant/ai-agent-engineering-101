@@ -106,7 +106,7 @@ class Program:
                 result.update(price=base-use, spent=use, benefit='credit')
         return result
 
-    def accept(self, task, unit, sku, cost, q):
+    def accept(self, task, unit, sku, cost, q, inventory=None):
         """Reserve stock/credit durably before signing. Unknown payment keeps reservation.
 
         Returns a provisional bearer credential only for a newly enrolled customer.
@@ -115,6 +115,13 @@ class Program:
         secret = None
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
+            self.db.execute('CREATE TABLE IF NOT EXISTS warranties(task TEXT PRIMARY KEY, amount INTEGER, issued REAL)')
+            if q.get('warranty_hours'):
+                if inventory is None:raise ValueError('Missing warranty cash evidence')
+                exposure=self.db.execute('SELECT COALESCE(SUM(w.amount),0) FROM warranties w JOIN sales s ON s.task=w.task WHERE s.refunded=0 AND (s.settled IS NULL OR s.settled>?)',(time.time()-21600,)).fetchone()[0]
+                reserve=max(500000,inventory.get('start',5000000)*.5)
+                if inventory.get('balance',0)-exposure-q['price']<reserve:raise ValueError('Warranty reserve unavailable')
+                self.db.execute('INSERT INTO warranties VALUES(?,?,?)',(task,q['price'],time.time()))
             mid = q['member']
             if mid and q['spent']:
                 credit = self.db.execute('SELECT credit FROM members WHERE id=?', (mid,)).fetchone()[0]
@@ -132,7 +139,10 @@ class Program:
         return secret
 
     def reserved_units(self):
-        return {r[0] for r in self.db.execute('SELECT unit FROM sales')}
+        held={r[0] for r in self.db.execute('SELECT unit FROM sales')}
+        if self.db.execute("SELECT 1 FROM sqlite_master WHERE name='quote_holds'").fetchone():
+            held.update(r[0] for r in self.db.execute('SELECT unit FROM quote_holds WHERE until>?',(time.time(),)))
+        return held
 
     def settle(self, row, shop_urls):
         d = row.get('data', {})
