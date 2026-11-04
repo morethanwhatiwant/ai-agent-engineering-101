@@ -64,19 +64,25 @@ def sync(program, urls):
 
 
 def campaign_text(program, inventory):
-    p = program.p
-    return (f"[{p['shop_name']}] 다시 살수록, 친구와 함께 살수록 이득! "
-            f"창립단골 {p['founder_limit']}명은 {p['ends_at'][:10]}까지 일반 견적 대비 {p['founder_percent']}% 할인. "
-            f"친구는 최대 {p['friend_percent']}% 할인, 추천인은 최대 {p['referrer_percent']}% 재구매 크레딧"
-            f"(건당 {p['reward_cap']}원 한도). "
-            "단골 조건: 결제 + 솔직한 리뷰(별점 무관) + 거래번호 refs를 넣은 포럼 후기, 6시간 후 확인. "
-            "추천 혜택은 마진 한도 내·중복 불가. 가게에 PROGRAM으로 참여하세요.")
+    from seller_strategy import sale_quote
+    p=program.p;lines=[f"[{p['shop_name']} · 실제 재고 / 시장 인증서]"]
+    held=program.reserved_units()
+    for u in inventory.get('units',[]):
+        if u.get('unit') in held:continue
+        try:q=sale_quote(u,{},program)
+        except (KeyError,ValueError):continue
+        condition=f"보증 {q['warranty_hours']}h" if q.get('warranty_hours') else '식품 남은 기한 문의'
+        lines.append(f"{u['sku']} {u.get('name','')[:24]} · {u['grade']} · {q['price']:,}원 · {condition}")
+        if len(lines)==3:break
+    lines.append(f"OFFERS로 확인 → SKU 견적 → 숫자로 구매. 직접 추천: 친구 최대 {p['friend_percent']}% 할인·추천인 최대 {p['referrer_percent']}% 크레딧(각 {p['reward_cap']}원 한도·마진 제한·정산 후 6h). 기존 창립단골 혜택은 PROGRAM. 재고·가격 재확인.")
+    return '\n'.join(lines)
 
 
 
 def queue_post(program, state, inventory, now=None):
     now = time.time() if now is None else now
-    available = [u for u in inventory.get('units', []) if u.get('grade') != 'expired'
+    held=program.reserved_units()
+    available = [u for u in inventory.get('units', []) if u.get('unit') not in held and u.get('grade') != 'expired'
                  and (not u.get('expires_at') or u['expires_at'] > now)]
     if inventory.get('round', 0) < 3 or not available or not program.live(now):
         return False
@@ -95,7 +101,7 @@ def queue_post(program, state, inventory, now=None):
             return False
         for k, v in [('last_post', now), ('post_count', count+1)]:
             program.db.execute('INSERT OR REPLACE INTO meta VALUES(?,?)', (k, json.dumps(v)))
-    row = {'as': 'shop', 'post': campaign_text(program, inventory), 'refs': []}
+    row = {'as': 'shop', 'post': campaign_text(program, dict(inventory,units=available)), 'refs': []}
     fd = os.open(Path(state) / 'outbox.jsonl', os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     try:
         os.write(fd, (json.dumps(row, ensure_ascii=False)+'\n').encode())

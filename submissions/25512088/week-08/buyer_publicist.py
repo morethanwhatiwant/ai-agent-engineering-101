@@ -22,7 +22,7 @@ def latest_paid_post(intel):
         outcome=json.loads(body);product=catalog.get(sku,{})
         return paid_post(outcome.get('name',product.get('name',sku)),sku,price,
                          outcome.get('grade','미확인'),product.get('list_price'),
-                         outcome.get('claim_honest'),ledger),ledger
+                         outcome.get('claim_honest'),ledger,outcome.get('warranty_hours')),ledger
     return None
 
 
@@ -65,7 +65,7 @@ def queue_update(intel):
                 try:q=sale_quote(u,cat,program,intel)
                 except ValueError:continue
                 hours=(u['expires_at']-now)/3600 if u.get('expires_at') else None
-                count=intel.comparable(u['sku'],u['grade'],hours,0)['count']
+                count=intel.comparable(u['sku'],u['grade'],hours,q.get('warranty_hours',0))['count']
                 offers.append((q['price']/u['list_price'],u,q,count))
             if offers:
                 # Rotate distinct products instead of repeatedly advertising the cheapest unit.

@@ -14,7 +14,7 @@ class CopyTests(unittest.TestCase):
         self.assertIn('12%↓',s)
         self.assertIn('46h',s)
         self.assertNotIn('%↓',price_line(u,{'price':11000},1000))
-        self.assertIn('보증을 제공하지 않습니다',SHOP_DESCRIPTION)
+        self.assertIn('6시간 보증',SHOP_DESCRIPTION)
     def test_only_paid_evidence_and_no_duplicate_purchase_post(self):
         with tempfile.TemporaryDirectory() as d:
             intel=Intel(d);m=Memory(d)
