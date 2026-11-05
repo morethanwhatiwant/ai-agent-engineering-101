@@ -358,6 +358,23 @@ class Buyer:
                 except Exception:pass
 
 
+def verified_other_shops(shops, board, own_name):
+    """Require a fresh market-owned identity map; never infer missing owners."""
+    rows = {r.get('name'): r for r in board.get('shops', [])}
+    owner = (rows.get(own_name, {}).get('owner') or {}).get('login')
+    if not owner:
+        raise ValueError('Our market owner cannot be verified')
+    result = []
+    for shop in shops:
+        row = rows.get(shop.get('name'), {})
+        other = (row.get('owner') or {}).get('login')
+        if shop.get('name') == own_name or (other and other.casefold() == owner.casefold()):
+            continue
+        if other or row.get('house') is True:
+            result.append(shop)
+    return result
+
+
 def main():
     ap=argparse.ArgumentParser()
     for name in ('shops','order'):
@@ -390,16 +407,17 @@ def main():
                 shops=json.loads(Path(args.shops).read_text())
                 shops=[dict(s,pubkey=keys[(s['url'],s['name'])]) for s in shops if (s['url'],s['name']) in keys]
                 shops=exclude_own_shop(shops, *own_shop_identity())
-                # Same GitHub owner with another shop/key cannot settle either.
-                board=intel.source('board',{}) or {}
-                own_name=own_shop_identity()[0]
-                own_row=next((r for r in board.get('shops',[]) if r.get('name')==own_name),{})
-                owner=(own_row.get('owner') or {}).get('login')
-                if owner:
-                    own_names={r.get('name') for r in board.get('shops',[]) if (r.get('owner') or {}).get('login')==owner}
-                    shops=[s for s in shops if s.get('name') not in own_names]
-                out=Buyer(order,memory,client,json.loads((Path(args.state)/'catalog.json').read_text()),intel).run(
-                    shops)
+                # Refresh ownership for each order; stale/missing cached data
+                # must never allow settlement with another shop of our owner.
+                try:
+                    response=client.get(args.market.rstrip('/')+'/api/board',timeout=8)
+                    response.raise_for_status()
+                    shops=verified_other_shops(shops,response.json(),own_shop_identity()[0])
+                except (httpx.HTTPError, ValueError, TypeError, KeyError):
+                    memory.state(order['order'],'ownership_unverified')
+                    out=dict(shop='',receipt=None,stars=3,review='Market ownership unavailable; no purchase attempted')
+                else:
+                    out=Buyer(order,memory,client,json.loads((Path(args.state)/'catalog.json').read_text()),intel).run(shops)
         print(json.dumps(out,ensure_ascii=False),flush=True)
     finally:
         memory.close()

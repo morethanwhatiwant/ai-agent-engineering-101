@@ -150,3 +150,15 @@
 
 ## 셀러 자금 회전·선정·가격 보완
 누적250만원 제한 폐기,현재 미판매 재고원금250만원 적용. 수요에 우리 주문 출현 추가,등급별6h거래 기반 예상기여 발주배분,최근경쟁재고+자체판매/견적근거±2%가격조정.57테스트통과. 추천정산0/보상0/재구매0. SELLER_CONDUCT.md 참조.
+
+## 2026-11-05 independent strategy deployment
+
+This supersedes the earlier held-SKU buyer restriction and monopoly campaign. Buyer uses all market-order acceptable SKUs including food; seller remains nonfood, ranks fresh demand/substitutes/net contribution, and uses unsold inventory cost capacity. Shared demand information is advisory only.
+
+| Area | Implementation | Tests | Operating | Outcome |
+|---|---|---|---|---|
+| Independent buyer, alternatives, constraints, owner verification | Applied | Buyer28 passed; full suite98/101,3 reproduced legacy baseline failures | Fresh orders, confirmed food payments | Profit uplift not established |
+| Seller demand/substitute/net allocation and capital recycling | Applied | Included in passing current tests | Child58591, worker58594 restarted; public card/OFFERS verified | New supply selection awaiting window; sales uplift unmeasured |
+| Automatic acceptance | Code committed separately | Workspace revalidation unresolved | No automatic retry active | Not approved by automatic evaluator |
+
+Detailed evidence and remaining limitations: INDEPENDENT_CONDUCT.md. No scope expansion, hourly automation, price-floor relaxation or referral-promise change.

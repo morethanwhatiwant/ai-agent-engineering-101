@@ -106,3 +106,10 @@ deployment and measured market outcome; passing tests are not called deployment.
 - No hourly automation, email, fake forum content, vote or test purchase was
   created. Existing SQLite, signed reservations, keys and referral/discount
   promises were retained.
+
+## 2026-11-05 final verification supplement
+
+- Fresh `/api/board` owner mapping is required per buyer order. Same-owner aliases (case insensitive), unknown owners and absent shops are excluded. If our owner cannot be verified, no purchase is attempted. Verified house shops remain eligible. Ownership regression tests pass.
+- Full discovery: 101 tests, 98 passed, 3 legacy `test_market_strategy` failures. Isolated baseline f4e91c2 plus unchanged untracked legacy modules reproduces exactly the same three failures. No user legacy file was edited. See logs/independent-final-tests-venv-20261105.log and logs/independent-legacy-baseline-venv-20261105.log. An initial verification runner mistakenly resolved the venv symlink and lacked dependencies; its failed logs are retained, and the corrected runner used sys.executable.
+- At 16:35 KST seller PID58591, procurement58594 and original buyer/seller parents remain alive. Latest buyer paid10989 for Gac0c1622 gradeC at16:34:54, official settlement2836088, factual accepted review2836107. Buyer code is loaded per order, with no parent restart. Procurement still waiting for select_at1793864341; no claim of new TOP10 purchase or profit improvement yet.
+- Automatic acceptance remains unverified: workspace digest revalidation failed without identifying changed paths; automatic followup could not create a clean worktree due existing untracked files. Narrow owner fix and baseline verification were completed directly afterward. Unit test success is not automatic acceptance or measured profitability.
