@@ -57,6 +57,12 @@ deployment and measured market outcome; passing tests are not called deployment.
   `/agent.md`, `/api/board`, `/api/shops`, `/api/ledger?after=-1000`,
   `/api/forum?limit=100`, and `/api/demand?limit=100`; the endpoint timed out from
   this shell. No zero-market conclusion is drawn.
+- Connectivity recovered at 16:25 KST. Bounded reads then succeeded for all six
+  sources: `agent.md` 17,386 bytes, board, shops (only one row in that transient
+  snapshot and not ours), ledger `after=-50` with seq 2,834,032-2,834,081,
+  forum `limit=20` with 20 rows, and demand `limit=20` (the server returned its
+  full 140-row category list). The live rule says buyer ALL weights are surplus
+  .5, buyer-role forum votes .3, deals .1 and visible buyer posts .1.
 - The already running authenticated processes continued refreshing public-derived
   files: demand 16:18:46, forum 16:18:44 and market log 16:18:45 KST. Shops last
   refreshed 16:10:54 before the market began returning no-shop responses. The
@@ -74,7 +80,29 @@ deployment and measured market outcome; passing tests are not called deployment.
 
 ## Deployment record
 
-Pending at document creation. This section must be updated with PID/cwd/runtime,
-restart time, first new buyer order, public card/inventory freshness and seller
-worker v3 event. Market performance requires later real orders/sales and is not
-inferred from tests.
+- Buyer parent PID 76006 remained attached to its original terminal and loads a
+  fresh `buyer_r3.py` for each order, so no parent restart was needed. At 16:20 it
+  enumerated multiple shops/SKUs for a food order instead of emitting the old
+  strategic-stock skip. At 16:21 order `o-3e95b4dcc1bf` (food, 84h required)
+  bought `Gac0c1622` B grade for 15,984, verified the certificate and settled at
+  ledger #2833035; the factual review was accepted. This proves loading and one
+  real food checkout, not performance improvement.
+- Seller parent PID 78645, proxy and tunnel were preserved. Its child exited on
+  SIGTERM and the existing watchdog loaded the current code as PID 58591 at
+  16:24:48. The public card at the existing tunnel reports Don Quixote, nonfood,
+  honest grades, cert, signed receipt and 6h warranty. A read-only public `OFFERS`
+  call returned actual A-grade stock with SKU, price, warranty and instructions.
+  Local inventory was fresh and had 15 units costing 294,248 with 6,083,669 cash.
+- The seller spawned v3 procurement worker PID 58594 using the required week-06
+  venv. It recovered after two empty registry snapshots, then after three
+  market-side public-card validation timeouts. At epoch 1793863571 it logged
+  `started`; subsequent `waiting_selection` events target select_at 1793864341.
+  No supply POST was made and no fake purchase was forced.
+- The next official supply window was more than three minutes away when checked,
+  so `snapshot()` correctly returned no early selection. Registry/card access has
+  recovered and the worker is operational, but a real v3 TOP10 and any resulting
+  purchase remain unmeasured until `select_at`. Code tests, a waiting worker and
+  public card/OFFERS are deployment evidence, not sales-performance evidence.
+- No hourly automation, email, fake forum content, vote or test purchase was
+  created. Existing SQLite, signed reservations, keys and referral/discount
+  promises were retained.
