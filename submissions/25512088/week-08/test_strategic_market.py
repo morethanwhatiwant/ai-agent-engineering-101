@@ -6,15 +6,34 @@ class StrategyTests(unittest.TestCase):
  def test_selection_waits_until_three_minutes_before_supply(self):
   self.assertIsNone(snapshot('/must-not-be-created',{},time.time()+1000,'https://unused'))
  def test_top10_requires_demand_nonfood_and_prefers_short_supply(self):
-  cat={str(i):dict(kind='goods',name=str(i),list_price=500000) for i in range(15)}
-  cat['food']=dict(kind='food',name='food',list_price=900000)
-  trades=[dict(sku=k,price=400000,warranty=6,honest=1) for k in cat for _ in range(5)]
-  shops=[dict(name='other',url='other',stock={'0':100}),dict(name='25512088',url='own',stock={'1':100})]
-  rows=rank_products(cat,trades,shops)
+  now=time.time();cat={str(i):dict(kind='goods',name=str(i),list_price=100000,category='c') for i in range(15)}
+  cat['food']=dict(kind='food',name='food',list_price=900000,category='f')
+  trades=[dict(sku=k,price=95000,warranty=6,honest=1,grade=g,ts=now-100,buyer='b'+str(n))
+          for k in cat for n,g in enumerate('ABCAB')]
+  shops=[dict(name='other',url='other',offers=[{'sku':'0','qty':100}]),dict(name='25512088',url='own',offers=[{'sku':'1','qty':100}])]
+  rows=rank_products(cat,trades,shops,now=now)
   self.assertEqual(len(rows),10)
   self.assertNotIn('food',[r['sku'] for r in rows]);self.assertNotIn('0',[r['sku'] for r in rows])
-  self.assertEqual(next(r for r in rows if r['sku']=='1')['competitor_units'],0)
+  self.assertEqual(next(r for r in rows if r['sku']=='1')['competitor_same_units'],0)
   self.assertEqual(rank_products(cat,trades[:1],shops),[])
+ def test_active_distinct_buyers_and_substitute_competition_are_explicit(self):
+  now=time.time();cat={'x':dict(kind='goods',name='x',list_price=100000,category='chairs'),
+   'y':dict(kind='goods',name='y',list_price=110000,category='chairs')}
+  trades=[dict(sku='x',price=95000,warranty=6,honest=1,grade=g,ts=now-60,buyer=b)
+          for g,b in [('A','alive'),('B','recent'),('C','alive')]]
+  rows=rank_products(cat,trades,[dict(name='rival',url='r',offers=[dict(sku='y',qty=4)])],alive_buyers={'alive'},now=now)
+  x=next(r for r in rows if r['sku']=='x')
+  self.assertEqual(x['distinct_buyers_1h'],2);self.assertEqual(x['alive_recent_buyers_6h'],1)
+  self.assertEqual(x['competitor_substitute_units'],4)
+  self.assertEqual(x['exact_grade_warranty_trades'],3)
+ def test_high_price_is_not_gate_and_negative_net_is_not_forced(self):
+  now=time.time();cat={'low':dict(kind='goods',name='low',list_price=100000,category='c'),
+   'high':dict(kind='goods',name='high',list_price=1000000,category='h')}
+  good=[dict(sku='low',price=95000,warranty=6,honest=1,grade=g,ts=now-10,buyer='b'+g) for g in 'ABC']
+  bad=[dict(sku='high',price=100000,warranty=6,honest=1,grade=g,ts=now-10,buyer='h'+g) for g in 'ABC']
+  rows=rank_products(cat,good+bad,[],now=now)
+  self.assertEqual([r['sku'] for r in rows],['low'])
+  self.assertGreater(rows[0]['expected_net'],0)
  def test_buyer_intersection_held_paid_not_signed_and_not_food(self):
   with tempfile.TemporaryDirectory() as d:
    p=Path(d);inv=dict(round=3,units=[dict(unit='u',sku='X',kind='goods',grade='A'),dict(unit='v',sku='Y',kind='goods',grade='B')])

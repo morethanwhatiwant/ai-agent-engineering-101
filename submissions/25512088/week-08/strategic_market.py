@@ -11,45 +11,101 @@ from statistics import median
 from market_intel import Intel, read_json
 
 
-def rank_products(catalog, trades, shops, own_name='25512088', local_demand=None):
+GRADE_COSTS={'A':(.55,.75,.65,.70),'B':(.40,.60,.50,.20),'C':(.25,.45,.35,.10)}
+
+
+def _shop_offers(shop):
+    offers=shop.get('offers') or []
+    if offers:return [(o.get('sku'),o.get('qty',0)) for o in offers]
+    return list((shop.get('stock') or {}).items())
+
+
+def rank_products(catalog, trades, shops, own_name='25512088', local_demand=None,
+                  own_signals=None, alive_buyers=None, now=None):
+    """Version-3 evidence TOP10: likelihood x net contribution, never price alone."""
+    now=time.time() if now is None else now
     local_demand=local_demand or {}
-    prices = {}; supply = {}; vendors = {}
-    for row in trades:
-        if row['warranty'] != 6 or not row['honest']:
-            continue
-        sku=row['sku']
-        if catalog.get(sku,{}).get('kind') != 'goods':continue
-        prices.setdefault(sku,[]).append(row['price'])
+    own_signals=own_signals or {}
+    alive_buyers=set(alive_buyers or [])
+    valid=[]
+    for raw in trades:
+        row=dict(raw);product=catalog.get(row.get('sku'),{})
+        if product.get('kind')!='goods' or row.get('warranty')!=6 or not row.get('honest'):continue
+        # A recent purchase is activity evidence even if the board has already
+        # marked that buyer offline. Missing buyer identity is never invented.
+        if row.get('ts',0)>=now-21600:valid.append(row)
+    exact={};category={}
+    for row in valid:
+        exact.setdefault(row['sku'],[]).append(row)
+        cat=catalog[row['sku']].get('category')
+        if cat:category.setdefault(cat,[]).append(row)
+    same_units={};same_vendors={};listed=[]
     for shop in shops:
-        if shop.get('name') == own_name:continue
-        for sku,qty in shop.get('stock',{}).items():
-            if isinstance(qty,(int,float)) and qty>0:
-                supply[sku]=supply.get(sku,0)+qty
-                vendors.setdefault(sku,set()).add(shop.get('url',shop.get('name')))
-    if not prices:return []
-    medians=sorted(median(v) for v in prices.values())
-    # High-price means the upper quartile of observed non-food 6h trades.
-    threshold=medians[int((len(medians)-1)*.75)]
+        if shop.get('name')==own_name:continue
+        for sku,qty in _shop_offers(shop):
+            if sku not in catalog or type(qty) not in (int,float) or qty<=0:continue
+            same_units[sku]=same_units.get(sku,0)+qty
+            same_vendors.setdefault(sku,set()).add(shop.get('url',shop.get('name')))
+            listed.append((sku,qty,shop.get('url',shop.get('name'))))
+    candidates=set(exact)|set(local_demand)|set(own_signals.get('sku_6h',{}))
+    # Category purchase evidence can introduce substitutes, but only with
+    # observed buyers or our own concrete inquiry/stockout signal.
+    signaled_categories=set(own_signals.get('category_6h',{}))|set(category)
+    for sku,p in catalog.items():
+        if p.get('kind')=='goods' and p.get('category') in signaled_categories:candidates.add(sku)
     rows=[]
-    for sku,values in prices.items():
-        product=catalog[sku];price=median(values)
-        if len(values)<3 or price<threshold:continue
-        qty=supply.get(sku,0);count=len(vendors.get(sku,set()))
+    for sku in candidates:
+        product=catalog.get(sku,{})
+        if product.get('kind')!='goods' or not product.get('list_price'):continue
+        observed=exact.get(sku,[]);cat=product.get('category');cat_rows=category.get(cat,[])
+        one_hour=[r for r in observed if r.get('ts',0)>=now-3600]
+        buyers_1h={r.get('buyer') for r in one_hour if r.get('buyer')}
+        buyers_6h={r.get('buyer') for r in observed if r.get('buyer')}
+        active_6h={b for b in buyers_6h if not alive_buyers or b in alive_buyers}
+        inquiries=own_signals.get('sku_6h',{}).get(sku,0)+local_demand.get(sku,0)
+        rejected=own_signals.get('stockout_6h',{}).get(sku,0)
+        category_buyers={r.get('buyer') for r in cat_rows if r.get('buyer')}
+        if not observed and not inquiries and not rejected and len(category_buyers)<2:continue
+        substitute_units=0;substitute_vendors=set();substitute_skus=set()
+        lo,hi=product['list_price']*.5,product['list_price']*1.5
+        for other,qty,vendor in listed:
+            op=catalog.get(other,{})
+            if other!=sku and op.get('category')==cat and lo<=op.get('list_price',0)<=hi:
+                substitute_units+=qty;substitute_vendors.add(vendor);substitute_skus.add(other)
         scenarios=[];expected=0
-        for grade,prob,rate in [('A',.7,.65),('B',.2,.50),('C',.1,.35)]:
-            observations=[r['price'] for r in trades if r['sku']==sku and r.get('grade')==grade and r['warranty']==6 and r['honest']]
-            typical=median(observations) if observations else None
-            cost=product['list_price']*rate
-            # Unknown grade-price evidence contributes a conservative unsold cost.
+        for grade,(cost_lo,cost_hi,cost_mean,arrival) in GRADE_COSTS.items():
+            prices=[r['price'] for r in observed if r.get('grade')==grade]
+            typical=median(prices) if prices else None
+            cost=product['list_price']*cost_mean
+            # 15% is a conservative unmeasured warranty hazard prior.  Benefit,
+            # capital and referral reserves stay explicit; missing trade price
+            # is treated as an unsold unit rather than fabricated demand.
             net=typical*.85*.95-cost*1.09-2000 if typical else -cost
-            expected+=prob*net
-            scenarios.append(dict(grade=grade,samples=len(observations),median_6h=typical,mean_cost=cost,net_estimate=net))
-        requests=local_demand.get(sku,0)
-        score=(len(values)+min(requests,len(values))*.25)*price/((1+qty)*(1+count)**.5)
-        rows.append(dict(expected_net=expected,grade_scenarios=scenarios,local_requests=requests,sku=sku,name=product['name'],sales=len(values),median_6h=price,
-                         competitor_units=qty,competitor_shops=count,score=score,
-                         upper_cost=math.ceil(product['list_price']*.75)))
-    return sorted(rows,key=lambda r:(-r['score'],r['sku']))[:10]
+            expected+=arrival*net
+            scenarios.append(dict(grade=grade,arrival_probability=arrival,
+                acquisition_cost_range=[cost_lo,cost_hi],samples=len(prices),median_6h=typical,
+                mean_cost=cost,net_estimate=net,hazard_probability=.15,
+                hazard_basis='conservative-unmeasured; replace with matured warranty cohorts'))
+        evidence=(len(one_hour)*2+len(observed)+len(active_6h)*1.5+
+                  min(inquiries,10)*.35+min(rejected,10)*.5+min(len(category_buyers),10)*.25)
+        competition=same_units.get(sku,0)+substitute_units*.35
+        likelihood=min(.95,evidence/(evidence+4+competition*.15)) if evidence else 0
+        contribution=max(0,expected)
+        score=likelihood*contribution/max(1,product['list_price']*.75)
+        rows.append(dict(version=3,sku=sku,name=product.get('name',sku),category=cat,
+            sales_1h=len(one_hour),sales_6h=len(observed),distinct_buyers_1h=len(buyers_1h),
+            distinct_buyers_6h=len(buyers_6h),alive_recent_buyers_6h=len(active_6h),
+            buyer_identity_coverage=sum(bool(r.get('buyer')) for r in observed),
+            own_order_mentions_6h=local_demand.get(sku,0),own_inquiries_6h=inquiries,
+            own_stockouts_6h=rejected,own_orders_bias='personal evidence only; not purchasing obligations',
+            exact_grade_warranty_trades=len(observed),grade_scenarios=scenarios,
+            expected_net=expected,estimated_sale_likelihood=round(likelihood,4),
+            competitor_same_units=same_units.get(sku,0),competitor_same_shops=len(same_vendors.get(sku,set())),
+            competitor_substitute_units=substitute_units,
+            competitor_substitute_shops=len(substitute_vendors),substitute_skus=len(substitute_skus),
+            score=score,upper_cost=math.ceil(product['list_price']*.75)))
+    # Negative contribution never becomes a forced purchase. Fewer than ten is valid.
+    return sorted((r for r in rows if r['expected_net']>0),key=lambda r:(-r['score'],-r['expected_net'],r['sku']))[:10]
 
 
 def snapshot(state,catalog,opens_at,market):
@@ -62,8 +118,10 @@ def snapshot(state,catalog,opens_at,market):
             def get(path):
                 response=client.get(market+path);response.raise_for_status();return response.json()
             shops=retry_read(lambda:get('/api/shops'))
+            board=retry_read(lambda:get('/api/board'))
             recent=retry_read(lambda:get('/api/ledger?after=-1000'))
         intel.save_source('shops',shops)
+        intel.save_source('board',board)
         intel.ingest(recent)
         if recent:
             intel.put('ledger_through',max(intel.get('ledger_through',0),max(r['ts'] for r in recent)))
@@ -71,22 +129,34 @@ def snapshot(state,catalog,opens_at,market):
         if not shops or time.time()-through>900:
             return None  # Do not substitute an old ranking for the scheduled snapshot.
         rows=[dict(r) for r in intel.db.execute('SELECT * FROM trades WHERE ts>?',(time.time()-21600,))]
-        demand={}
+        demand={};own_signals={'sku_6h':{},'category_6h':{},'stockout_6h':{}}
         buyer_path=Path(state)/'buyer.sqlite3'
         if buyer_path.exists():
             with sqlite3.connect('file:'+str(buyer_path.resolve())+'?mode=ro',uri=True) as db:
                 for (context,) in db.execute('SELECT context FROM orders WHERE updated>?',(time.time()-21600,)):
-                    for sku in set(json.loads(context).get('acceptable') or []):demand[sku]=demand.get(sku,0)+1
-        top=rank_products(catalog,rows,shops.get('shops',[]),local_demand=demand)
+                    order=json.loads(context)
+                    for sku in set(order.get('acceptable') or []):demand[sku]=demand.get(sku,0)+1
+                    cat=order.get('category')
+                    if cat:own_signals['category_6h'][cat]=own_signals['category_6h'].get(cat,0)+1
+        for row in intel.db.execute("SELECT body FROM decisions WHERE role IN ('seller_quote','seller_no_stock') AND ts>?",(time.time()-21600,)):
+            body=json.loads(row[0])
+            for sku in ([body.get('sku')] if body.get('sku') else body.get('skus',[])):
+                key='stockout_6h' if body.get('reason') else 'sku_6h'
+                own_signals[key][sku]=own_signals[key].get(sku,0)+1
+        shop_rows=shops.get('shops',[]) if isinstance(shops,dict) else shops
+        alive={r.get('name') for r in board.get('buyers',[]) if r.get('alive') is True}
+        top=rank_products(catalog,rows,shop_rows,local_demand=demand,own_signals=own_signals,alive_buyers=alive)
         feedback=[]
         buyer_db=Path(state)/'buyer.sqlite3'
         if buyer_db.exists():
             with sqlite3.connect('file:'+str(buyer_db.resolve())+'?mode=ro',uri=True) as db:
                 if db.execute("SELECT 1 FROM sqlite_master WHERE name='rival_feedback'").fetchone():
                     feedback=[dict(order=r[0],sku=r[1],ledger=r[2],observed_at=r[3],stock=json.loads(r[4]),error=r[5]) for r in db.execute('SELECT * FROM rival_feedback ORDER BY observed_at DESC LIMIT 20')]
-        result=dict(version=2,buyer_feedback=feedback,opens_at=opens_at,selected_at=time.time(),ledger_through=through,
+        result=dict(version=3,buyer_feedback=feedback,opens_at=opens_at,selected_at=time.time(),ledger_through=through,
                     late=time.time()>opens_at-150,top10=top,
-                    demand_basis='observed honest settlements with 6h warranty in last 6h; incomplete sample')
+                    fetch_bounds={'ledger_after':-1000,'ledger_rows':len(recent),'max_age_seconds':900},
+                    demand_basis=('current alive and recently active buyer 1h/6h public purchases; exact grade+6h '
+                                  'honest trades; own inquiries/stockouts; own buyer orders are biased personal evidence'))
         path=Path(state)/'strategy.json';tmp=path.with_suffix('.tmp')
         tmp.write_text(json.dumps(result,ensure_ascii=False));os.replace(tmp,path)
         intel.decision('strategy_snapshot',result)

@@ -1,5 +1,5 @@
 import unittest
-from procurement_campaign import choose
+from procurement_campaign import choose,allocation_plan,supply_result
 class PurchaseTests(unittest.TestCase):
  def setUp(self):
   self.p={'budget':2500000,'cash_floor':500000,'priority':['a','b','c','d']}
@@ -21,4 +21,16 @@ class PurchaseTests(unittest.TestCase):
   self.assertEqual(choose(self.p,self.cat,1900000,0,5000000,0,0),('a',300000))
  def test_reward_and_warranty_liabilities_limit_cash(self):
   self.assertIsNone(choose(self.p,self.cat,0,0,1000000,300000,0))
+ def test_allocation_uses_sellthrough_holdings_and_positive_net_without_unit_cap(self):
+  ranked=[dict(sku='a',expected_net=50000,score=3,upper_cost=100000,sales_1h=8,sales_6h=12,
+               own_stockouts_6h=2,own_inquiries_6h=1,estimated_sale_likelihood=.8),
+          dict(sku='b',expected_net=-1,score=99,upper_cost=1,sales_1h=100,sales_6h=100,
+               own_stockouts_6h=0,own_inquiries_6h=0,estimated_sale_likelihood=1)]
+  plan=allocation_plan(ranked,{'units':[{'sku':'a'}]},900000)
+  self.assertEqual(plan[0]['sku'],'a');self.assertGreater(plan[0]['qty'],4)
+  self.assertNotIn('b',[r['sku'] for r in plan])
+ def test_unknown_or_invalid_supply_result_stops_for_reconciliation(self):
+  self.assertEqual(supply_result(503,{},100),('uncertain',None))
+  self.assertEqual(supply_result(200,{'total':101},100),('reconcile',None))
+  self.assertEqual(supply_result(200,{'total':90},100),('paid',90))
 if __name__=='__main__':unittest.main()

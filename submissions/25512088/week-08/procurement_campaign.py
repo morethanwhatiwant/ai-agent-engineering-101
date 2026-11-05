@@ -23,6 +23,40 @@ def choose(policy,catalog,spent,reserved,balance,exposure,turn,blocked=()):
         if upper<=remaining:return sku,upper
     return None
 
+def allocation_plan(ranked, inventory, available, blocked=()):
+    """Allocate by sell-through, holdings, next-window need and contribution.
+
+    There is no fixed four-SKU loop or unit cap. Quantity is bounded by the
+    evidence forecast and protected capital, not an arbitrary constant.
+    """
+    holding={}
+    for unit in inventory.get('units',[]):holding[unit['sku']]=holding.get(unit['sku'],0)+1
+    choices=[]
+    for row in ranked:
+        if row.get('sku') in blocked or row.get('expected_net',0)<=0:continue
+        velocity=row.get('sales_1h',0)+row.get('sales_6h',0)/6
+        unmet=row.get('own_stockouts_6h',0)*.5+row.get('own_inquiries_6h',0)*.2
+        forecast=(velocity+unmet)*row.get('estimated_sale_likelihood',0)
+        need=max(0,math.ceil(forecast)-holding.get(row['sku'],0))
+        if need<=0:continue
+        choices.append((-(row.get('score',0)*row['expected_net']/max(1,row['upper_cost'])),row['sku'],need,row))
+    plan=[]
+    for _,sku,need,row in sorted(choices):
+        qty=min(need,int(available//row['upper_cost']))
+        if qty<=0:continue
+        plan.append({'sku':sku,'qty':qty,'upper_unit_cost':row['upper_cost'],
+                     'capital':qty*row['upper_cost'],'evidence':row})
+        available-=qty*row['upper_cost']
+    return plan
+
+def supply_result(status, body, upper):
+    """Classify a received response; no response is handled as uncertain."""
+    if status>=500:return 'uncertain',None
+    if status!=200:return 'refused',None
+    cost=body.get('total') if isinstance(body,dict) else None
+    if type(cost) is not int or not 0<cost<=upper:return 'reconcile',None
+    return 'paid',cost
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--state',default='.market');args=ap.parse_args()
     state=Path(args.state).resolve();policy=settings();state.mkdir(exist_ok=True)
@@ -65,46 +99,48 @@ def main():
         strategy=read_json(state/'strategy.json',{})
         if not isinstance(opening,(int,float)):
             log(event='missing_supply_window');time.sleep(20);continue
-        if (strategy.get('opens_at')!=opening or strategy.get('version')!=2) and time.time()>=opening-180:
+        if (strategy.get('opens_at')!=opening or strategy.get('version')!=3) and time.time()>=opening-180:
             try:strategy=snapshot(state,catalog,opening,market.base) or {}
             except Exception as exc:
                 log(event='selection_retry',error=type(exc).__name__);time.sleep(20);continue
-        if strategy.get('opens_at')!=opening or strategy.get('version')!=2:
+        if strategy.get('opens_at')!=opening or strategy.get('version')!=3:
             log(event='waiting_selection',select_at=opening-180,spent=spent)
             time.sleep(min(20,max(1,opening-180-time.time())));continue
         ranked=strategy.get('top10',[])
         if not ranked:
             log(event='no_qualified_top10');time.sleep(20);continue
-        # Diminishing allocation: spread budget as own holdings grow, no unit cap.
-        counts={sku:sum(u['sku']==sku for u in inv['units']) for sku in catalog}
         ranked=[r for r in ranked if r.get('expected_net',0)>0]
-        ranked=sorted(ranked,key=lambda r:-(r['score']*r['expected_net']/max(1,r['upper_cost']))/(1+counts.get(r['sku'],0)))
-        current=dict(policy,priority=[r['sku'] for r in ranked])
-        picked=choose(current,catalog,inventory_cost,pending,inv['balance'],exposure,0,blocked)
-        if not picked:
+        available=max(0,min(policy['budget']-inventory_cost-pending,
+                            inv['balance']-policy['cash_floor']-exposure))
+        plan=allocation_plan(ranked,inv,available,blocked)
+        if not plan:
             if blocked:time.sleep(10);continue
             log(event='budget_wait',lifetime_spent=spent,inventory_cost=inventory_cost,remaining=policy['budget']-inventory_cost,protected_liabilities=exposure)
             time.sleep(60);continue
         if not restock.get('open'):
             log(event='waiting_supply',opens_at=restock.get('opens_at'),spent=spent)
             time.sleep(min(20,max(2,restock.get('opens_at',time.time()+20)-time.time())));continue
-        sku,upper=picked
+        selected=plan[0];sku=selected['sku'];qty=selected['qty'];upper=selected['capital']
         with db:
             cursor=db.execute('INSERT INTO purchases(campaign,sku,upper_cost,status,created) VALUES(?,?,?,?,?)',(policy['campaign'],sku,upper,'sent',time.time()));rid=cursor.lastrowid
         try:
-            result=market.call('POST','/api/supply','shop',json={'sku':sku,'qty':1})
+            result=market.call('POST','/api/supply','shop',json={'sku':sku,'qty':qty})
         except Exception as exc:
             with db:db.execute("UPDATE purchases SET status='uncertain',detail=? WHERE id=?",(type(exc).__name__,rid))
             log(event='uncertain_stop',sku=sku);break
-        if result.status_code==200:
-            body=result.json();cost=body.get('total')
-            if type(cost) is not int or not 0<cost<=upper:
+        body=result.json() if result.status_code==200 else {}
+        outcome,cost=supply_result(result.status_code,body,upper)
+        if outcome=='paid':
+            if cost is None:
                 log(event='unexpected_cost_stop',sku=sku);break
             with db:db.execute("UPDATE purchases SET status='paid',cost=?,detail=? WHERE id=?",(cost,json.dumps({'balance':body.get('balance')}),rid))
-            log(event='purchased',sku=sku,qty=1,cost=cost,spent=spent+cost,balance=body.get('balance'))
-        elif result.status_code>=500:
+            log(event='purchased',sku=sku,qty=qty,cost=cost,spent=spent+cost,balance=body.get('balance'),
+                allocation={'holding':sum(u['sku']==sku for u in inv['units']),
+                            'sales_1h':selected['evidence'].get('sales_1h'),
+                            'next_window_need':qty,'expected_net':selected['evidence'].get('expected_net')})
+        elif outcome in ('uncertain','reconcile'):
             with db:db.execute("UPDATE purchases SET status='uncertain',detail=? WHERE id=?",(str(result.status_code),rid))
-            log(event='uncertain_stop',sku=sku,status=result.status_code);break
+            log(event='uncertain_stop' if outcome=='uncertain' else 'reconciliation_stop',sku=sku,status=result.status_code);break
         else:
             with db:db.execute("UPDATE purchases SET status='refused',detail=? WHERE id=?",(str(result.status_code),rid))
             log(event='refused',sku=sku,status=result.status_code,reason=result.text[:180])

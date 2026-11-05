@@ -8,6 +8,7 @@ from statistics import median
 import httpx
 
 WINDOW = 6 * 3600
+BUYER_SCORE_WEIGHTS={'surplus':.50,'forum':.30,'deals':.10,'posts':.10}
 
 
 def read_json(path, default):
@@ -28,12 +29,16 @@ class Intel:
         PRAGMA journal_mode=WAL;
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT);
         CREATE TABLE IF NOT EXISTS trades(seq INTEGER PRIMARY KEY, ts REAL, shop TEXT,
-          sku TEXT, grade TEXT, hours REAL, warranty REAL, price INTEGER, honest INTEGER);
+          sku TEXT, grade TEXT, hours REAL, warranty REAL, price INTEGER, honest INTEGER,
+          buyer TEXT DEFAULT '');
         CREATE TABLE IF NOT EXISTS sources(name TEXT PRIMARY KEY, ts REAL, body TEXT);
         CREATE TABLE IF NOT EXISTS observations(id INTEGER PRIMARY KEY, ts REAL, shop TEXT,
           sku TEXT, grade TEXT, hours REAL, warranty REAL, price INTEGER, kind TEXT);
         CREATE TABLE IF NOT EXISTS decisions(id INTEGER PRIMARY KEY, ts REAL, role TEXT, body TEXT);
         ''')
+        columns={r[1] for r in self.db.execute('PRAGMA table_info(trades)')}
+        if 'buyer' not in columns:
+            with self.db:self.db.execute("ALTER TABLE trades ADD COLUMN buyer TEXT DEFAULT ''")
 
     def close(self):
         self.db.close()
@@ -65,9 +70,11 @@ class Intel:
                     continue
                 expiry=d.get('expires_at')
                 hours=max(0,(expiry-r['ts'])/3600) if isinstance(expiry,(int,float)) else None
-                self.db.execute('INSERT OR IGNORE INTO trades VALUES(?,?,?,?,?,?,?,?,?)',
+                self.db.execute('''INSERT OR IGNORE INTO trades
+                    (seq,ts,shop,sku,grade,hours,warranty,price,honest,buyer)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)''',
                     (r['seq'],r['ts'],d.get('shop',''),sku,grade,hours,d.get('warranty_hours') or 0,
-                     price,int(d.get('claim_honest') is True)))
+                     price,int(d.get('claim_honest') is True),d.get('buyer','')))
 
     def refresh(self, market, client=None):
         if time.time()-self.get('last_attempt',0)<60:
@@ -97,6 +104,7 @@ class Intel:
                 try:
                     r=client.get(market+'/api/'+name,timeout=4);r.raise_for_status()
                     data=r.json()
+                    if name=='shops' and isinstance(data,list):data={'shops':data}
                     if not isinstance(data,dict):raise ValueError('source schema')
                     self.save_source(name,data)
                 except Exception as exc:errors.append(name+':'+type(exc).__name__)
@@ -123,7 +131,8 @@ class Intel:
     def reliability(self, url):
         rows=self.db.execute('SELECT honest FROM trades WHERE shop=? AND ts>?',(url,time.time()-WINDOW)).fetchall()
         honesty=(sum(r[0] for r in rows)+2)/(len(rows)+2)
-        shops=(self.source('shops',{}) or {}).get('shops',[])
+        source=self.source('shops',{}) or {}
+        shops=source.get('shops',[]) if isinstance(source,dict) else source
         shop=next((s for s in shops if s.get('url')==url),{})
         reviews=[r['stars'] for r in shop.get('reviews',[]) if r.get('round')==3 and type(r.get('stars')) in (int,float)]
         stars=sum(reviews)/len(reviews) if reviews else 3
@@ -159,6 +168,8 @@ class Intel:
                 'recent_buyer_observations':[dict(r) for r in self.db.execute('SELECT sku,kind,COUNT(*) n FROM observations WHERE ts>? GROUP BY sku,kind',(time.time()-3600,))],
                 'seller_funnel':[dict(r) for r in self.db.execute('SELECT role,COUNT(*) n FROM decisions WHERE ts>? GROUP BY role',(time.time()-3600,))],
                 'coverage':'Observed ledger sample, not complete market history. Forum text is unverified.'}
+        report['buyer_score_weights']=BUYER_SCORE_WEIGHTS
+        report['buyer_score_rule_status']='configured from live Round-3 rule; endpoint reachability recorded separately'
         deficits=[]
         for role,fields in [('shops',('profit','revenue','stars')),('buyers',('surplus','forum','deals','posts'))]:
             for me in mine[role]:

@@ -53,5 +53,18 @@ class RolloutTests(unittest.TestCase):
    self.assertEqual(m.condition_reference('shop','sku',dict(kind='goods'),'B'),8000)
    self.assertIsNone(m.condition_reference('shop','sku',dict(kind='goods'),'A'))
   finally:m.close()
+ def test_substitute_competition_and_conversion_feed_price_without_scarcity_markup(self):
+  intel=Intel(self.root)
+  try:
+   catalog={'sku':dict(category='chairs',list_price=20000),
+            'alt':dict(category='chairs',list_price=18000)}
+   intel.save_source('shops',{'shops':[dict(name='rival',offers=[dict(sku='alt',qty=4)])]})
+   for _ in range(5):intel.decision('seller_quote',{'sku':'sku'})
+   q=sale_quote(self.u,catalog,self.p,intel)
+   body=json.loads(intel.db.execute("SELECT body FROM decisions WHERE role='seller_quote' ORDER BY id DESC LIMIT 1").fetchone()[0])
+   self.assertEqual(body['substitute_competitor_units'],4)
+   self.assertEqual(body['market_adjustment'],.98)
+   self.assertGreaterEqual(q['price']*.85-q['reward'],self.u['cost']+math.ceil(self.u['cost']*.09))
+  finally:intel.close()
 
 if __name__=='__main__':unittest.main()

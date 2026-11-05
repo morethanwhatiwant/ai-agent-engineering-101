@@ -5,7 +5,7 @@ import time
 import unittest
 from unittest.mock import patch
 import httpx
-from market_intel import Intel
+from market_intel import Intel,BUYER_SCORE_WEIGHTS
 from seller_strategy import sale_quote,restock_plan,cost_floor,protected_floor
 from referral_program import Program
 from buyer_publicist import queue_update
@@ -27,6 +27,10 @@ class IntelligenceTests(unittest.TestCase):
         rows=self.rows();rows += [dict(rows[0],seq=9,round=2),dict(rows[0],seq=10,kind='result')]
         self.i.ingest(rows);self.i.ingest(rows)
         self.assertEqual(self.i.db.execute('select count(*) from trades').fetchone()[0],4)
+    def test_ingest_preserves_public_buyer_identity_for_distinct_demand(self):
+        rows=self.rows();rows[0]['data']['buyer']='buyer-a'
+        self.i.ingest(rows)
+        self.assertEqual(self.i.db.execute('select buyer from trades where seq=1').fetchone()[0],'buyer-a')
     def test_price_requires_same_grade_warranty_and_enough_samples(self):
         self.i.ingest(self.rows())
         self.assertEqual(self.i.comparable('x','A')['median'],9500)
@@ -53,20 +57,22 @@ class IntelligenceTests(unittest.TestCase):
             for token,code in [('', ''),(key,''),('',ref)]:
                 q=sale_quote(dict(self.u,cost=cost),{},self.p,self.i,token,code)
                 self.assertGreaterEqual(q['price']-q['reward'],cost+__import__('math').ceil(cost*.09))
-    @patch("seller_strategy.settings", return_value={"external_campaign": False})
+    @patch("seller_strategy.settings", return_value={"external_campaign": False,"budget":2500000})
     def test_restock_window_cash_evidence_and_stock_limits(self, _policy):
         self.i.ingest(self.rows());self.i.put('ledger_through',time.time())
         inv=dict(round=3,restock={'open':True},balance=5000000,start=5000000,units=[])
         cat={'x':dict(list_price=10000,category='c')}
         self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[{'sku':'x','qty':1}])
         self.assertEqual(restock_plan(dict(inv,restock={'open':False}),cat,self.i)['buy'],[])
-        self.assertEqual(restock_plan(dict(inv,balance=2500000),cat,self.i)['buy'],[])
+        self.assertEqual(restock_plan(dict(inv,balance=500000),cat,self.i)['buy'],[])
         self.assertEqual(restock_plan(dict(inv,units=[self.u]*24),cat,self.i)['buy'],[])
         self.i.put('ledger_through',0)
         self.assertEqual(restock_plan(inv,cat,self.i)['buy'],[])
     def test_failure_deprioritizes_shop(self):
         before=self.i.reliability('url');self.i.observe('url','x','unavailable')
         self.assertLess(self.i.reliability('url'),before)
+    def test_live_buyer_score_policy_weights_include_forum_and_posts(self):
+        self.assertEqual(BUYER_SCORE_WEIGHTS,{'surplus':.50,'forum':.30,'deals':.10,'posts':.10})
     def test_offline_refresh_preserves_data(self):
         self.i.ingest(self.rows());self.i.put('cursor',4)
         with httpx.Client(transport=httpx.MockTransport(lambda r:httpx.Response(503))) as client:
