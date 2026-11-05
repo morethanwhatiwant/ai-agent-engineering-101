@@ -1,6 +1,6 @@
 import unittest
 from network_reads import retry_read
-from procurement_campaign import choose,allocation_plan,supply_result,own_registration
+from procurement_campaign import choose,allocation_plan,supply_result,own_registration,retry_join
 class PurchaseTests(unittest.TestCase):
  def setUp(self):
   self.p={'budget':2500000,'cash_floor':500000,'priority':['a','b','c','d']}
@@ -41,4 +41,12 @@ class PurchaseTests(unittest.TestCase):
    return own_registration([] if len(attempts)<3 else [{'name':'25512088'}])
   self.assertEqual(retry_read(registration,attempts=3,sleep=lambda _:None)['name'],'25512088')
   self.assertEqual(len(attempts),3)
+ def test_join_card_timeout_system_exit_is_retried(self):
+  attempts=[]
+  def join():
+   attempts.append(1)
+   if len(attempts)<2:raise SystemExit('card timeout')
+   return {'round':3}
+  self.assertEqual(retry_join(join,attempts=2,sleep=lambda _:None)['round'],3)
+  self.assertEqual(len(attempts),2)
 if __name__=='__main__':unittest.main()

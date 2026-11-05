@@ -63,6 +63,12 @@ def own_registration(body, name='25512088'):
     if not me:raise ConnectionError('own shop absent from registry snapshot')
     return me
 
+def retry_join(operation, report=None, attempts=None, sleep=time.sleep):
+    def guarded():
+        try:return operation()
+        except SystemExit as exc:raise ConnectionError('market join/card check failed') from exc
+    return retry_read(guarded,attempts=attempts,report=report,sleep=sleep)
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--state',default='.market');args=ap.parse_args()
     state=Path(args.state).resolve();policy=settings();state.mkdir(exist_ok=True)
@@ -79,7 +85,7 @@ def main():
         response=market.c.get(market.base+'/api/shops');response.raise_for_status()
         return own_registration(response.json())
     me=retry_read(get_registration, attempts=None, report=log)
-    market.join('shop','25512088',key,me['url'])
+    retry_join(lambda:market.join('shop','25512088',key,me['url']),report=log)
     catalog=json.loads((state/'catalog.json').read_text());blocked=set();window=None
     def log(**data):print(json.dumps(dict(ts=time.time(),**data),ensure_ascii=False),flush=True)
     log(event='started',campaign=policy['campaign'],budget=policy['budget'])
