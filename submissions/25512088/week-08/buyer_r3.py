@@ -87,7 +87,36 @@ def exclude_own_shop(shops, name, pubkey):
     return [s for s in shops if s.get('name') != name and s.get('pubkey') != pubkey]
 
 
+def execution_order(order):
+    """Preserve the complete market order; seller holdings never constrain it."""
+    return dict(order)
+
+
+BREAKAGE_PRIORS = {
+    # No authoritative market cohort is published.  These are deliberately
+    # conservative ranking assumptions, not claims about measured failure.
+    'food': {'probability': .05, 'basis': 'conservative-unmeasured'},
+    'goods': {'probability': .15, 'basis': 'conservative-unmeasured'},
+}
+
+
+def expected_offer(order, product, price, checkout_probability=1, reliability=1):
+    """Comparable absolute surplus with explicitly uncertain breakage.
+
+    Warranty refunds are not credited before a matured cohort exists.  This
+    keeps the estimate conservative while the signed checkout certificate
+    remains the authority for the actual conditions.
+    """
+    prior=BREAKAGE_PRIORS['food' if order.get('kind')=='food' else 'goods']
+    value=product['list_price']*(1-prior['probability'])
+    expected_surplus=value-price
+    valid=max(0,min(1,checkout_probability))*max(0,min(1,reliability))
+    return {'expected_surplus':expected_surplus,'valid_checkout_probability':valid,
+            'breakage_probability':prior['probability'],'breakage_basis':prior['basis']}
+
+
 def candidates(order, shops, catalog, memory, intel=None):
+    """Enumerate every eligible shop/SKU pair, not one preferred SKU per shop."""
     accepted = set(order['acceptable'])
     ranked = []
     for shop in shops:
@@ -98,7 +127,6 @@ def candidates(order, shops, catalog, memory, intel=None):
         if not options:
             continue
         reliability = intel.reliability(shop['url']) if intel else 1
-        alternatives=[]
         for offer in options:
             product=catalog[offer['sku']]
             reference=memory.condition_reference(shop['url'],offer['sku'],order)
@@ -107,13 +135,15 @@ def candidates(order, shops, catalog, memory, intel=None):
             cap=limit(order,product)
             # Above-cap prices may negotiate down, but must not look affordable
             # simply because we clipped the estimate to our budget.
-            prob=memory.deal_estimate(shop['url'])
-            score=surplus_score(product['list_price'],estimate,reliability)*min(1,cap/estimate)*prob['probability']
-            alternatives.append((-score,estimate,offer['sku'],offer))
-        best=min(alternatives,key=lambda r:r[:3])
-        ranked.append((best[0],shop['name'],shop,best[3]))
-    ranked.sort(key=lambda r:(r[0],r[1],r[3]['sku']))
-    return [(r[2],r[3]) for r in ranked]
+            deal=memory.deal_estimate(shop['url'])
+            metrics=expected_offer(order,product,estimate,deal['probability'],reliability)
+            # Feasible, large absolute gain and likely valid checkout come
+            # before tiny percentage discounts.  Price caps are never raised.
+            ranked.append((estimate>cap,-metrics['expected_surplus'],
+                           -metrics['valid_checkout_probability'],shop['name'],
+                           offer['sku'],shop,offer))
+    ranked.sort(key=lambda r:r[:5])
+    return [(r[5],r[6]) for r in ranked]
 
 
 def surplus_score(value, price, reliability=1):
@@ -122,12 +152,16 @@ def surplus_score(value, price, reliability=1):
     return max(0,value-price)*max(0,min(1,reliability))
 
 
-def quote_rank(session, catalog, intel=None):
+def quote_rank(session, catalog, intel=None, order=None):
     reliability=intel.reliability(session['shop']['url']) if intel else 1
     ask=session['ask']
-    return (ask>session['cap'],
-            -surplus_score(catalog[session['sku']]['list_price'],ask,reliability),
-            ask,session['shop']['name'],session['sku'])
+    order=order or {'kind':'goods'}
+    deal=session.get('deal_estimate',{'probability':1})
+    metrics=expected_offer(order,catalog[session['sku']],ask,deal['probability'],reliability)
+    session['expected']=metrics
+    return (ask>session['cap'],-metrics['expected_surplus']*metrics['valid_checkout_probability'],
+            -metrics['expected_surplus'],-metrics['valid_checkout_probability'],ask,
+            session['shop']['name'],session['sku'])
 
 
 def signed_receipt(task, shop, sku, maximum, task_id, failures=None):
@@ -218,7 +252,7 @@ class Buyer:
         worker=Buyer(self.o,memory,self.c,self.catalog)
         worker.deadline=self.deadline
         sku=offer['sku']; product=self.catalog[sku]
-        session=dict(shop=shop,sku=sku,cap=limit(self.o,product))
+        session=dict(shop=shop,sku=sku,cap=limit(self.o,product),deal_estimate=memory.deal_estimate(shop['url']))
         try:
             card=self.c.get(shop['url'].rstrip('/')+'/.well-known/agent-card.json',timeout=5)
             card.raise_for_status()
@@ -230,7 +264,10 @@ class Buyer:
             if key:request+=' member='+key
             print('QUOTE_REQUEST',shop['name'],sku,flush=True)
             worker.send(session,request)
-        except Exception as exc:session['error']=type(exc).__name__
+        except (httpx.TimeoutException,httpx.NetworkError) as exc:
+            session['error']='network';session['error_type']=type(exc).__name__
+        except Exception as exc:
+            session['error']='protocol';session['error_type']=type(exc).__name__
         finally:memory.close()
         return session
 
@@ -238,32 +275,50 @@ class Buyer:
         quotes=[]
         try:
             picks=candidates(self.o,shops,self.catalog,self.m,self.intel)
-            with ThreadPoolExecutor(max_workers=3) as pool:
-                # Submission order makes selection reproducible, irrespective of response speed.
-                pending=[pool.submit(self.open_session,shop,offer) for shop,offer in picks]
-                self.sessions=[f.result() for f in pending]
+            offered_skus={offer['sku'] for _,offer in picks}
+            missing=sorted(set(self.o['acceptable'])-offered_skus)
+            if missing:
+                self.m.record(self.o['order'],'','',None,'no_stock',details={'skus':missing})
+            # Six concurrent quotes, submitted in ranked waves.  Every pair is
+            # enumerated, but the deadline wins over chasing a long tail.
+            for start in range(0,len(picks),6):
+                if time.time()>=self.deadline-5:break
+                wave=picks[start:start+6]
+                with ThreadPoolExecutor(max_workers=min(6,len(wave))) as pool:
+                    results=list(pool.map(lambda pair:self.open_session(*pair),wave))
+                self.sessions.extend(results)
             for s in self.sessions:
                 shop=s['shop'];sku=s['sku']
                 if s.get('error'):
-                    if self.intel:self.intel.observe(shop['url'],sku,'unavailable')
-                    self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unavailable',details={'error':s['error']})
+                    if self.intel:self.intel.observe(shop['url'],sku,s['error']+'_error')
+                    self.m.record(self.o['order'],shop['url'],sku,s.get('task'),s['error']+'_error',details={'error':s.get('error_type')})
                     continue
                 task=s['last'];fields=quote_fields(task)
                 s['grade']=fields['grade'];s['cap']=limit(self.o,self.catalog[sku],s['grade'])
                 if task_state(task).endswith('COMPLETED'):
                     # A certificate, not a parsed claim, enforces the actual grade at payment.
                     return self.completed(s)
-                if not task_state(task).endswith('INPUT_REQUIRED'):continue
+                if not task_state(task).endswith('INPUT_REQUIRED'):
+                    kind='no_stock' if re.search(r'no (?:matching )?stock|out of stock|unavailable',text_of(task),re.I) else 'no_quote'
+                    self.m.record(self.o['order'],shop['url'],sku,s.get('task'),kind)
+                    continue
                 hours,wh=fields['hours'],fields['warranty']
                 unsuitable=(self.o.get('kind')=='food' and hours is not None and hours<self.o['use_within_hours']) or (self.o.get('kind')!='food' and wh is not None and wh<6)
                 if self.intel:self.intel.observe(shop['url'],sku,'condition_rejected' if unsuitable else 'quote',fields['price'],s['grade'],hours,wh)
-                if unsuitable:continue
+                if unsuitable:
+                    self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'condition_rejected',details={'hours':hours,'warranty':wh})
+                    continue
                 if fields['price']:
                     s['ask']=int(fields['price']);quotes.append(s)
-                else:self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'unparsed_quote')
-            quotes.sort(key=lambda s:quote_rank(s,self.catalog,self.intel))
-            self.m.record(self.o['order'],'','',None,'selection_v3',details={
-                'candidate_shops':len(picks),'parallel_limit':3,'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],'ask':s['ask'],'cap':s['cap'],'deal_estimate':self.m.deal_estimate(s['shop']['url'])} for s in quotes]})
+                else:self.m.record(self.o['order'],shop['url'],sku,s.get('task'),'no_quote')
+            quotes.sort(key=lambda s:quote_rank(s,self.catalog,self.intel,self.o))
+            self.m.record(self.o['order'],'','',None,'selection_v4',details={
+                'eligible_pairs':len(picks),'eligible_shops':len({s['url'] for s,_ in picks}),
+                'eligible_skus':sorted(offered_skus),'quoted_pairs':len(self.sessions),
+                'parallel_limit':6,'deadline_seconds':85,
+                'breakage_prior':BREAKAGE_PRIORS['food' if self.o.get('kind')=='food' else 'goods'],
+                'ranked_quotes':[{'shop':s['shop']['name'],'sku':s['sku'],'ask':s['ask'],'cap':s['cap'],
+                  'deal_estimate':s['deal_estimate'],**s['expected']} for s in quotes]})
             if not quotes:
                 self.m.state(self.o['order'],'no_quote');return self.result()
             for index,s in enumerate(quotes):
@@ -272,6 +327,8 @@ class Buyer:
                 stop=min(self.deadline,time.time()+(self.deadline-time.time())/(len(quotes)-index))
                 while time.time()<stop:
                     amount=min(s['ask'],s['cap'])
+                    if s['ask']>s['cap']:
+                        self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'price_rejected',s['ask'],{'cap':s['cap']})
                     self.m.record(self.o['order'],s['shop']['url'],s['sku'],s.get('task'),'offer',amount)
                     self.m.state(self.o['order'],'offer_in_flight')
                     print('OFFER',s['shop']['name'],s['sku'],amount,flush=True)
@@ -308,9 +365,10 @@ def main():
     ap.add_argument('--state',default='.market')
     ap.add_argument('--market',default='https://market.ourolabs.ai')
     args=ap.parse_args()
-    from strategic_market import restrict_order
     original_order=json.loads(Path(args.order).read_text())
-    order=restrict_order(original_order,args.state)
+    # Buying is independent from our seller inventory.  The market order's
+    # complete acceptable set (including food) is authoritative.
+    order=execution_order(original_order)
     memory=Memory(args.state)
     intel=Intel(args.state)
     try:
@@ -319,9 +377,9 @@ def main():
         refresh_feedback(memory,args.market)
         if not memory.begin(original_order):
             out=dict(shop='',receipt=None,stars=3,review='Order already seen; reconcile payment before retrying')
-        elif not order['acceptable']:
-            memory.state(order['order'],'no_strategic_stock')
-            out=dict(shop='',receipt=None,stars=3,review='No owned strategic SKU matches this order; purchase skipped')
+        elif not order.get('acceptable'):
+            memory.state(order['order'],'no_acceptable_sku')
+            out=dict(shop='',receipt=None,stars=3,review='Order contains no acceptable SKU')
         else:
             with httpx.Client(follow_redirects=False) as client:
                 # Kit omits pubkeys from shops.json. Fetch trusted registration

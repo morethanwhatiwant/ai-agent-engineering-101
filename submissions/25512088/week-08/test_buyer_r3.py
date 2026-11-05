@@ -9,7 +9,7 @@ import httpx
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives import serialization
 from buyer_memory import Memory
-from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt, exclude_own_shop, quote_rank
+from buyer_r3 import Buyer, asking, candidates, limit, signed_receipt, exclude_own_shop, quote_rank, execution_order, expected_offer
 from buyer_review import review
 
 
@@ -79,7 +79,34 @@ class BuyerTests(unittest.TestCase):
         catalog=dict(self.cat,SKU2=dict(name='larger',list_price=20000))
         order=dict(self.o,acceptable=['SKU1','SKU2'],budget=20000)
         shop=dict(self.shop,offers=self.shop['offers']+[dict(sku='SKU2',qty=1)])
-        self.assertEqual(candidates(order,[shop],catalog,self.m)[0][1]['sku'],'SKU2')
+        self.assertEqual([o['sku'] for _,o in candidates(order,[shop],catalog,self.m)],['SKU2','SKU1'])
+
+    def test_execution_keeps_food_and_every_acceptable_sku_independent_of_our_stock(self):
+        order=dict(self.o,acceptable=['SKU1','SKU2'])
+        self.assertEqual(execution_order(order),order)
+        self.assertEqual(execution_order(order)['kind'],'food')
+
+    def test_expected_surplus_declares_conservative_unmeasured_breakage(self):
+        food=expected_offer(self.o,self.cat['SKU1'],7000,.5,.8)
+        goods=expected_offer(dict(self.o,kind='goods'),self.cat['SKU1'],7000,.5,.8)
+        self.assertEqual(food['breakage_basis'],'conservative-unmeasured')
+        self.assertEqual(goods['breakage_probability'],.15)
+        self.assertEqual(food['valid_checkout_probability'],.4)
+        self.assertGreater(food['expected_surplus'],goods['expected_surplus'])
+
+    def test_run_enumerates_alternative_skus_at_same_shop(self):
+        cat=dict(self.cat,SKU2=dict(name='alt',list_price=12000,shelf_hours=72))
+        order=dict(self.o,acceptable=['SKU1','SKU2'])
+        shop=dict(self.shop,offers=[dict(sku='SKU1',qty=1),dict(sku='SKU2',qty=1)])
+        visited=[]
+        def opened(_shop,offer):
+            visited.append(offer['sku']);return dict(shop=_shop,sku=offer['sku'],error='network',error_type='ReadTimeout')
+        self.m.begin(order)
+        with httpx.Client() as client:
+            buyer=Buyer(order,self.m,client,cat)
+            with patch.object(buyer,'open_session',side_effect=opened):buyer.run([shop])
+        self.assertEqual(set(visited),{'SKU1','SKU2'})
+        self.assertEqual(self.m.db.execute("SELECT COUNT(*) FROM events WHERE kind='network_error'").fetchone()[0],2)
 
     def test_absolute_surplus_beats_discount_ratio(self):
         cat={'small':dict(list_price=10000),'large':dict(list_price=30000)}
