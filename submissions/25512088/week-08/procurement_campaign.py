@@ -57,6 +57,12 @@ def supply_result(status, body, upper):
     if type(cost) is not int or not 0<cost<=upper:return 'reconcile',None
     return 'paid',cost
 
+def own_registration(body, name='25512088'):
+    rows=body.get('shops',[]) if isinstance(body,dict) else body
+    me=next((s for s in rows if s.get('name')==name),None)
+    if not me:raise ConnectionError('own shop absent from registry snapshot')
+    return me
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--state',default='.market');args=ap.parse_args()
     state=Path(args.state).resolve();policy=settings();state.mkdir(exist_ok=True)
@@ -69,10 +75,10 @@ def main():
     assert (ROOT/'shop_key.pem').exists()
     key=kit.load_key(ROOT/'shop_key.pem');market=kit.Market('https://market.ourolabs.ai',os.environ.get('MARKET_OWNER'))
     def log(**data):print(json.dumps(dict(ts=time.time(),**data),ensure_ascii=False),flush=True)
-    def get_board():
-        response=market.c.get(market.base+'/api/shops');response.raise_for_status();return response
-    board=retry_read(get_board, attempts=None, report=log)
-    me=next(s for s in board.json()['shops'] if s['name']=='25512088')
+    def get_registration():
+        response=market.c.get(market.base+'/api/shops');response.raise_for_status()
+        return own_registration(response.json())
+    me=retry_read(get_registration, attempts=None, report=log)
     market.join('shop','25512088',key,me['url'])
     catalog=json.loads((state/'catalog.json').read_text());blocked=set();window=None
     def log(**data):print(json.dumps(dict(ts=time.time(),**data),ensure_ascii=False),flush=True)

@@ -1,5 +1,6 @@
 import unittest
-from procurement_campaign import choose,allocation_plan,supply_result
+from network_reads import retry_read
+from procurement_campaign import choose,allocation_plan,supply_result,own_registration
 class PurchaseTests(unittest.TestCase):
  def setUp(self):
   self.p={'budget':2500000,'cash_floor':500000,'priority':['a','b','c','d']}
@@ -33,4 +34,11 @@ class PurchaseTests(unittest.TestCase):
   self.assertEqual(supply_result(503,{},100),('uncertain',None))
   self.assertEqual(supply_result(200,{'total':101},100),('reconcile',None))
   self.assertEqual(supply_result(200,{'total':90},100),('paid',90))
+ def test_missing_registration_snapshot_is_retryable_read_failure(self):
+  attempts=[]
+  def registration():
+   attempts.append(1)
+   return own_registration([] if len(attempts)<3 else [{'name':'25512088'}])
+  self.assertEqual(retry_read(registration,attempts=3,sleep=lambda _:None)['name'],'25512088')
+  self.assertEqual(len(attempts),3)
 if __name__=='__main__':unittest.main()
